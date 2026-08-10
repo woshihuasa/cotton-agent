@@ -27,6 +27,7 @@ chroma_user_memory/
 # ── 打包产物 ──
 build/
 dist/
+*.zip
 
 # ── IDE ──
 .idea/
