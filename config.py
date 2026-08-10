@@ -100,8 +100,8 @@ class AppConfig:
     EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "BAAI/bge-large-zh-v1.5")
 
     # ── GitHub 更新检查 ──
-    GITHUB_OWNER: str = os.getenv("GITHUB_OWNER", "")
-    GITHUB_REPO: str = os.getenv("GITHUB_REPO", "")
+    GITHUB_OWNER: str = os.getenv("GITHUB_OWNER", "woshihuasa")
+    GITHUB_REPO: str = os.getenv("GITHUB_REPO", "cotton-agent")
 
     # ── 数据与持久化路径（三区分离）──
     DATA_DIR: str = str(resource_path("data"))              # 只读知识库文档
@@ -141,5 +141,7 @@ def reload_config() -> None:
                 "DEEPSEEK_MODEL": "deepseek-v4-flash",
                 "EMBEDDING_BASE_URL": "https://api.siliconflow.cn/v1",
                 "EMBEDDING_MODEL": "BAAI/bge-large-zh-v1.5",
+                "GITHUB_OWNER": "woshihuasa",
+                "GITHUB_REPO": "cotton-agent",
             }
             setattr(AppConfig, k, defaults.get(k, ""))
