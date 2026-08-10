@@ -63,12 +63,15 @@ python build_exe.py  # 产物: dist/CottonAgent/
 cotton_agent/
 ├── main.py                  # 程序入口
 ├── build_kb.py              # 知识库构建脚本
-├── build_exe.py             # exe 打包脚本
+├── build_exe.py             # exe 打包脚本（主程序 + updater）
+├── updater_runner.py        # 自动更新安装器（打包为 updater.exe）
+├── cotton_agent.spec        # 主程序打包配置（PyInstaller）
+├── updater.spec             # updater 打包配置（自动生成）
 ├── config.py                # 全局配置
 ├── core/
 │   ├── rag_engine.py        # RAG 引擎 + 工具循环
 │   ├── knowledge_base.py    # 向量库 + L4 记忆
-│   ├── kb_builder.py        # 知识库构建
+│   ├── kb_builder.py        # 知识库自动构建
 │   ├── cotton_stats.py      # 产量/面积统计查询
 │   ├── cotton_price.py      # 价格指数与波动率
 │   ├── trend_plot.py        # 图表生成
