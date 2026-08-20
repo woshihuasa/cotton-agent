@@ -58,6 +58,10 @@ class KnowledgeBase:
         self._memory_collection = self._chroma_client.get_or_create_collection(
             name="user_memory",
         )
+        # ---- L3 摘要向量化 (同一客户端下的独立 Collection, 可语义检索历史情节) ----
+        self._summary_collection = self._chroma_client.get_or_create_collection(
+            name="session_summaries",
+        )
 
     def _load_and_split_documents(self) -> list:
         """遍历数据目录，加载并切分所有支持的文档。
@@ -154,15 +158,19 @@ class KnowledgeBase:
 
     # ---- L4 实体记忆 (添加 / 查询 / 冲突消解) ----
 
-    def add_l4_memory(self, fact: str) -> str:
+    def add_l4_memory(self, fact: str, category: str = "fact") -> str:
         """存入单条实体事实，自动生成 UUID 和 timestamp 元数据。
 
         Args:
             fact: 一条实体事实陈述句。
+            category: 事实类别 — "fact"(客观事实) / "preference"(用户偏好)
+                      / "episodic"(事件经历)。
 
         Returns:
             新创建的文档 ID。
         """
+        if category not in ("fact", "preference", "episodic"):
+            category = "fact"
         doc_id = str(uuid.uuid4())
         embedding = self._embeddings.embed_documents([fact])
         self._memory_collection.add(
@@ -170,7 +178,8 @@ class KnowledgeBase:
             documents=[fact],
             metadatas=[{
                 "source": "L4_realtime",
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "category": category,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
             }],
             ids=[doc_id],
         )
@@ -224,6 +233,7 @@ class KnowledgeBase:
             ids=[doc_id],
             embeddings=new_embedding,
             documents=[new_fact],
+            metadatas=[{"updated_at": datetime.now(timezone.utc).isoformat()}],
         )
 
     def delete_l4_memory(self, doc_id: str) -> None:
@@ -234,18 +244,77 @@ class KnowledgeBase:
         """
         self._memory_collection.delete(ids=[doc_id])
 
-    def retrieve_l4_memory(self, query: str, k: int = 3) -> list[str]:
+    def retrieve_l4_memory(
+        self, query: str, k: int = 3, category: str | None = None,
+    ) -> list[str]:
         """语义检索与查询最相关的 L4 实体记忆。
+
+        Args:
+            query: 查询文本。
+            k: 返回数量，默认 3。
+            category: 可选类别过滤 — "fact"/"preference"/"episodic"；
+                      None 表示不过滤。
+
+        Returns:
+            相关事实字符串列表。
+        """
+        query_embedding = self._embeddings.embed_query(query)
+        kwargs: dict = {
+            "query_embeddings": [query_embedding],
+            "n_results": k,
+        }
+        if category in ("fact", "preference", "episodic"):
+            kwargs["where"] = {"category": category}
+        results = self._memory_collection.query(**kwargs)
+        docs: list = results.get("documents", [[]])
+        if docs and docs[0]:
+            return docs[0]
+        return []
+
+    # ---- L3 摘要向量化 (可语义检索的历史情节记忆) ----
+
+    def add_session_summary(
+        self, session_id: str, text: str, category: str = "summary",
+    ) -> str:
+        """将一段会话摘要向量化存入 L3 摘要库。
+
+        每段摘要作为独立文档保存（增量式），带 session_id / category /
+        timestamp 元数据，可通过语义检索"翻旧账"。
+
+        Args:
+            session_id: 所属会话 ID。
+            text: 摘要文本。
+            category: 摘要类别，默认 "summary"。
+
+        Returns:
+            新创建的文档 ID。
+        """
+        doc_id = str(uuid.uuid4())
+        embedding = self._embeddings.embed_documents([text])
+        self._summary_collection.add(
+            embeddings=embedding,
+            documents=[text],
+            metadatas=[{
+                "session_id": session_id,
+                "category": category,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }],
+            ids=[doc_id],
+        )
+        return doc_id
+
+    def retrieve_session_summaries(self, query: str, k: int = 3) -> list[str]:
+        """语义检索与查询最相关的历史摘要段。
 
         Args:
             query: 查询文本。
             k: 返回数量，默认 3。
 
         Returns:
-            相关事实字符串列表。
+            相关摘要文本列表。
         """
         query_embedding = self._embeddings.embed_query(query)
-        results = self._memory_collection.query(
+        results = self._summary_collection.query(
             query_embeddings=[query_embedding],
             n_results=k,
         )
@@ -253,6 +322,13 @@ class KnowledgeBase:
         if docs and docs[0]:
             return docs[0]
         return []
+
+    def clear_session_summaries(self, session_id: str) -> None:
+        """删除指定会话的全部向量化摘要（会话删除时调用）。"""
+        got = self._summary_collection.get(where={"session_id": session_id})
+        ids: list = got.get("ids") or []
+        if ids:
+            self._summary_collection.delete(ids=ids)
 
     def retrieve_context(self, query: str, k: int = 3) -> str:
         """语义检索与查询最相关的 Top-K 文档片段。

@@ -116,7 +116,11 @@ L4_EXTRACT_PROMPT = (
     "请根据当前对话、近期对话历史和长期摘要, "
     "提取关于用户农场的关键事实或偏好。\n"
     "每条事实必须是一个独立的、可验证的陈述句。\n"
-    '以 JSON 数组格式输出, 例如: ["用户种植新陆早77号", "用户位于阿克苏"]。\n'
+    "以 JSON 数组格式输出对象, 每个对象包含 fact 和 category 两个字段:\n"
+    '[{"fact": "用户种植新陆早77号", "category": "fact"}, '
+    '{"fact": "用户偏好早熟品种", "category": "preference"}]\n'
+    'category 取值: "fact"(客观事实) / "preference"(用户偏好) / '
+    '"episodic"(事件经历)。\n'
     "不要输出任何解释, 只输出 JSON 数组。\n\n"
     "当前提问: {question}\n"
     "当前回答: {answer}\n"
@@ -332,6 +336,11 @@ class RAGEngine:
             if self.current_session_id == session_id:
                 self.current_session_id = next(iter(self.sessions))
             self._save_session_state()
+        # 清理该会话的向量化摘要（锁外网络请求）
+        try:
+            self.kb.clear_session_summaries(session_id)
+        except Exception as e:
+            print(f"[Session] 清理向量化摘要失败: {e}")
         print(f"[Session] 删除: {session_id[:8]}...")
         return True
 
@@ -409,16 +418,22 @@ class RAGEngine:
                     {"role": "user", "content": SUMMARY_PROMPT.format(history_text="\n".join(lines))},
                 ])
                 if summary and not summary.startswith("抱歉"):
+                    summary = summary.strip()
                     with self._lock:
                         session = self.sessions.get(sid)
                         if session is None:
                             return
                         if session.summary_memory:
-                            session.summary_memory += "\n" + summary.strip()
+                            session.summary_memory += "\n" + summary
                         else:
-                            session.summary_memory = summary.strip()
+                            session.summary_memory = summary
                         print(f"[L3 Updated] 摘要: {session.summary_memory[:100]}...")
                         self._save_session_state()
+                    # L3 向量化：将新摘要段存入向量库（锁外网络请求，可语义检索历史情节）
+                    try:
+                        self.kb.add_session_summary(sid, summary)
+                    except Exception as e:
+                        print(f"[L3 向量化] 摘要存储失败: {e}")
 
                 with self._lock:
                     session = self.sessions.get(sid)
@@ -431,12 +446,18 @@ class RAGEngine:
                             {"role": "user", "content": L3_COMPRESS_PROMPT.format(old_summaries=sm)},
                         ])
                         if compressed and not compressed.startswith("抱歉"):
+                            compressed = compressed.strip()
                             with self._lock:
                                 session = self.sessions.get(sid)
                                 if session is not None:
-                                    session.summary_memory = compressed.strip()
+                                    session.summary_memory = compressed
                                     print("[L3 压缩] 二次压缩完成")
                                     self._save_session_state()
+                            # 压缩后的全局视角同样向量化存储
+                            try:
+                                self.kb.add_session_summary(sid, compressed, category="summary_compressed")
+                            except Exception as e:
+                                print(f"[L3 向量化] 压缩摘要存储失败: {e}")
             except Exception as e:
                 print(f"[RAGEngine] L3 摘要失败: {e}")
 
@@ -489,13 +510,24 @@ class RAGEngine:
                 if not candidates:
                     return
 
-                for fact in candidates:
-                    if not fact.strip():
+                for item in candidates:
+                    # 兼容新格式 {"fact": "...", "category": "..."} 与旧格式字符串
+                    if isinstance(item, dict):
+                        fact = (item.get("fact") or "").strip()
+                        category = item.get("category") or "fact"
+                    elif isinstance(item, str):
+                        fact = item.strip()
+                        category = "fact"
+                    else:
                         continue
+                    if not fact:
+                        continue
+                    if category not in ("fact", "preference", "episodic"):
+                        category = "fact"
                     old_id, old_text = self.kb.search_l4_for_conflict(fact)
                     if old_id is None:
-                        self.kb.add_l4_memory(fact)
-                        print(f"[L4 Action] ADD: {fact}")
+                        self.kb.add_l4_memory(fact, category)
+                        print(f"[L4 Action] ADD: {fact} ({category})")
                     else:
                         decision_raw = self.llm.generate_response([{
                             "role": "user",
@@ -509,8 +541,8 @@ class RAGEngine:
                             self.kb.delete_l4_memory(old_id)
                             print(f"[L4 Action] DELETE: {old_text}")
                         elif "ADD" in decision:
-                            self.kb.add_l4_memory(fact)
-                            print(f"[L4 Action] ADD (conflict): {fact}")
+                            self.kb.add_l4_memory(fact, category)
+                            print(f"[L4 Action] ADD (conflict): {fact} ({category})")
                         else:
                             print(f"[L4 Action] NOOP: {fact}")
             except Exception as e:
@@ -1119,7 +1151,20 @@ class RAGEngine:
 
         summary_section = ""
         if sm:
-            summary_section = "【历史摘要】(来自长期记忆):\n" + sm + "\n\n"
+            # L3 向量化后：语义召回相关历史摘要段（翻旧账）+ 当前完整摘要（最新状态）
+            recalled: list[str] = []
+            try:
+                recalled = self.kb.retrieve_session_summaries(search_query, k=3)
+            except Exception:
+                recalled = []
+            parts = []
+            for seg in recalled:
+                seg = seg.strip()
+                if seg and seg != sm.strip() and seg not in parts:
+                    parts.append(seg)
+            if parts:
+                summary_section = "【历史摘要】(来自长期记忆):\n" + "\n".join(parts) + "\n\n"
+            summary_section += "【当前会话状态】:\n" + sm.strip() + "\n\n"
 
         system_content = SYSTEM_PROMPT.format(
             today_date=date.today(),

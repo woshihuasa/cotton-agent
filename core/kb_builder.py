@@ -169,15 +169,16 @@ def rebuild_knowledge_base() -> tuple[bool, str]:
     try:
         from core.knowledge_base import KnowledgeBase
 
-        # 模型变化 → 清空 L4 记忆库（维度不兼容，保留会检索报错）
+        # 模型变化 → 清空 L4 记忆库与 L3 摘要库（维度不兼容，保留会检索报错）
         if model_changed():
             try:
                 import chromadb
 
                 client = chromadb.PersistentClient(path=AppConfig.USER_MEMORY_DB_PATH)
                 client.delete_collection("user_memory")
-                print("[KB] Embedding 模型已更换，L4 记忆库已重建。")
-                log.info("Embedding 模型已更换，L4 记忆库已重建。")
+                client.delete_collection("session_summaries")
+                print("[KB] Embedding 模型已更换，L4 记忆库与 L3 摘要库已重建。")
+                log.info("Embedding 模型已更换，L4 记忆库与 L3 摘要库已重建。")
             except Exception:
                 pass
 
