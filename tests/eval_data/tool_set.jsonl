@@ -1,0 +1,30 @@
+{"id": 1, "prompt": "今天阿拉尔天气怎么样", "expected_tool": "get_weather", "note": "天气-今天"}
+{"id": 2, "prompt": "明天阿克苏会下雨吗", "expected_tool": "get_weather", "note": "天气-明天"}
+{"id": 3, "prompt": "2026-08-15 喀什的天气如何", "expected_tool": "get_weather", "note": "天气-指定日期"}
+{"id": 4, "prompt": "我这周适合打药吗，看下天气", "expected_tool": "get_weather", "note": "天气-农事关联（无城市时应追问或默认）"}
+{"id": 5, "prompt": "库尔勒现在多少度", "expected_tool": "get_weather", "note": "天气-温度"}
+{"id": 6, "prompt": "新疆2026年棉花目标价格补贴政策是什么", "expected_tool": "web_search", "note": "最新政策（知识库外）"}
+{"id": 7, "prompt": "最近的棉花期货行情怎么样", "expected_tool": "web_search", "note": "实时行情"}
+{"id": 8, "prompt": "今年棉花收购价走势如何", "expected_tool": ["web_search", "calc_price_volatility", "plot_trend"], "note": "歧义样本：市场价（联网）/ 现货指数（本地到 2026-07）/ 画走势图 均可接受——'走势'一词在三者间天然模糊"}
+{"id": 9, "prompt": "国家最近发布了哪些棉花产业相关通知", "expected_tool": "web_search", "note": "最新新闻"}
+{"id": 10, "prompt": "阿克苏地区2022年棉花产量是多少", "expected_tool": "query_cotton_stats", "note": "单点查询-市级"}
+{"id": 11, "prompt": "沙湾市2020年播种面积", "expected_tool": "query_cotton_stats", "note": "县级查询（'塔城地区-沙湾市'）"}
+{"id": 12, "prompt": "喀什地区2015到2022年的棉花总产量", "expected_tool": "query_cotton_stats", "note": "合计（stat=total）"}
+{"id": 13, "prompt": "巴州2018到2022年平均每年产多少棉花", "expected_tool": "query_cotton_stats", "note": "平均（stat=avg）"}
+{"id": 14, "prompt": "2022年棉花产量排前五的地区是哪些", "expected_tool": "query_cotton_stats", "note": "排名（stat=rank, top=5）"}
+{"id": 15, "prompt": "阿克苏2021年的棉花亩产是多少公斤", "expected_tool": "query_cotton_stats", "note": "亩产（metric=mu）"}
+{"id": 16, "prompt": "1985年新疆全区棉花产量是多少", "expected_tool": "query_cotton_stats", "note": "主要年份（stat=major，全区）"}
+{"id": 17, "prompt": "生产建设兵团2022年的长绒棉产量", "expected_tool": "query_cotton_stats", "note": "长绒棉（metric=long_yield）"}
+{"id": 18, "prompt": "3128B棉花价格指数最新是多少", "expected_tool": "calc_price_volatility", "note": "价格（metric=price，默认等级）"}
+{"id": 19, "prompt": "2129B在2024年6月的价格是多少", "expected_tool": "calc_price_volatility", "note": "指定等级+月份"}
+{"id": 20, "prompt": "3128B从2026年1月到6月涨跌了多少", "expected_tool": "calc_price_volatility", "note": "涨跌幅（metric=pct_change）"}
+{"id": 21, "prompt": "2023年棉花价格指数的年化波动率是多少", "expected_tool": "calc_price_volatility", "note": "波动率（metric=volatility, period=annual）"}
+{"id": 22, "prompt": "现在棉花价格处于历史上什么分位水平", "expected_tool": "calc_price_volatility", "note": "历史分位（metric=percentile）"}
+{"id": 23, "prompt": "画一下阿克苏从2018到2022年的产量趋势图", "expected_tool": "plot_trend", "note": "单地区趋势图"}
+{"id": 24, "prompt": "对比喀什和巴州2015到2022年的播种面积变化", "expected_tool": "plot_trend", "note": "多地区对比（regions 数组）"}
+{"id": 25, "prompt": "把2020年棉花价格走势画出来", "expected_tool": "plot_trend", "note": "价格趋势图（metric=price）"}
+{"id": 26, "prompt": "预测一下2027年阿克苏地区的棉花产量", "expected_tool": "analyze_yield", "note": "预测（stat=forecast, target_year>2022）"}
+{"id": 27, "prompt": "哪些棉花产区的产量波动风险最高", "expected_tool": "analyze_yield", "note": "风险分级（stat=risk）"}
+{"id": 28, "prompt": "喀什地区最近几年产量波动风险怎么样", "expected_tool": "analyze_yield", "note": "指定地区风险（stat=risk, regions）"}
+{"id": 29, "prompt": "棉花播种前需要做哪些准备工作", "expected_tool": null, "note": "知识库可答，不应调工具"}
+{"id": 30, "prompt": "棉花蚜虫怎么防治", "expected_tool": null, "note": "知识库可答，不应调工具"}

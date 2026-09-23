@@ -1,0 +1,20 @@
+{"id": 1, "question": "对比一下喀什和阿克苏2022年的棉花产量，帮我画个图", "expected_tools": ["query_cotton_stats", "plot_trend"], "key_points": ["喀什", "阿克苏", "2022", "数据对比", "图表"], "should_refuse": false, "note": "查询+绘图组合"}
+{"id": 2, "question": "3128B棉花价格从2025年到现在涨跌了多少，画个走势图", "expected_tools": ["calc_price_volatility", "plot_trend"], "key_points": ["涨跌幅", "趋势图"], "should_refuse": false, "note": "价格分析+绘图"}
+{"id": 3, "question": "预测一下2027年阿克苏地区的棉花产量，并说明预测依据", "expected_tools": ["analyze_yield"], "key_points": ["预测值", "置信区间", "趋势", "说明基于历史外推"], "should_refuse": false, "note": "预测+免责说明"}
+{"id": 4, "question": "目前哪些棉花产区产量波动风险最高，给种植户什么建议", "expected_tools": ["analyze_yield"], "key_points": ["风险分级", "产区", "建议"], "should_refuse": false, "note": "风险分析+建议"}
+{"id": 5, "question": "棉花花铃期应该怎么灌溉，浇多少水", "expected_tools": [], "key_points": ["花铃期", "含水量", "滴水量"], "should_refuse": false, "note": "纯知识库问答"}
+{"id": 6, "question": "今天阿拉尔适合打药吗", "expected_tools": ["get_weather"], "key_points": ["天气", "打药适宜性"], "should_refuse": false, "note": "天气+农事判断"}
+{"id": 7, "question": "棉花期货套期保值具体怎么操作，保证金比例多少", "expected_tools": [], "key_points": ["拒答或说明资料不足"], "should_refuse": true, "note": "知识库无金融衍生品内容"}
+{"id": 8, "question": "帮我制定一份100亩棉田的全年种植计划", "expected_tools": [], "key_points": ["分阶段建议或说明局限", "参考知识库资料"], "should_refuse": false, "note": "综合性规划（可部分拒答，考察诚实性）"}
+{"id": 9, "question": "阿克苏和喀什2020到2022年三年的产量对比情况", "expected_tools": ["query_cotton_stats"], "key_points": ["两地", "三年数据"], "should_refuse": false, "note": "多点多轮查询"}
+{"id": 10, "question": "现在棉花价格处于历史什么位置，适合囤货吗", "expected_tools": ["calc_price_volatility"], "key_points": ["分位", "谨慎表述（不提供投资建议）"], "should_refuse": false, "note": "价格分析+合规表述"}
+{"id": 11, "question": "新疆现在主要种哪些棉花品种", "expected_tools": [], "key_points": ["品种", "知识库资料"], "should_refuse": false, "note": "知识库问答"}
+{"id": 12, "question": "2026年棉花种植有没有新的补贴政策", "expected_tools": ["web_search"], "key_points": ["政策", "时效性"], "should_refuse": false, "note": "联网检索"}
+{"id": 13, "question": "阿瓦提县2021年棉花亩产是多少", "expected_tools": ["query_cotton_stats"], "key_points": ["亩产", "县级归地区"], "should_refuse": false, "note": "县级查询+地区归属"}
+{"id": 14, "question": "棉田遇到持续高温干旱该怎么处理", "expected_tools": [], "key_points": ["灌水降温", "叶面肥", "田间管理"], "should_refuse": false, "note": "知识库-高温应对"}
+{"id": 15, "question": "把2016到2022年新疆全区棉花产量趋势画出来", "expected_tools": ["plot_trend"], "key_points": ["全区", "趋势图"], "should_refuse": false, "note": "全区趋势（major 数据）"}
+{"id": 16, "question": "预测2030年全区的棉花产量大概是多少", "expected_tools": ["analyze_yield"], "key_points": ["预测", "置信区间"], "should_refuse": false, "note": "全区预测"}
+{"id": 17, "question": "比特币今天的价格是多少", "expected_tools": [], "key_points": ["明确表示超出能力范围"], "should_refuse": true, "note": "无关问题"}
+{"id": 18, "question": "我家有20亩棉田，按现在的建议第一次滴水要滴多少方", "expected_tools": [], "key_points": ["亩均水量", "换算20亩（或说明需按实际情况）"], "should_refuse": false, "note": "知识库+简单计算"}
+{"id": 19, "question": "沙湾市和精河县哪个棉花产量更高", "expected_tools": ["query_cotton_stats"], "key_points": ["两地数据", "对比"], "should_refuse": false, "note": "县级对比"}
+{"id": 20, "question": "帮我总结一下新疆棉花产业最近几年的发展情况", "expected_tools": [], "key_points": ["产量", "品质", "产业", "知识库综合"], "should_refuse": false, "note": "综合总结（多文档）"}

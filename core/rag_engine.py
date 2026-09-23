@@ -117,8 +117,8 @@ L4_EXTRACT_PROMPT = (
     "提取关于用户农场的关键事实或偏好。\n"
     "每条事实必须是一个独立的、可验证的陈述句。\n"
     "以 JSON 数组格式输出对象, 每个对象包含 fact 和 category 两个字段:\n"
-    '[{"fact": "用户种植新陆早77号", "category": "fact"}, '
-    '{"fact": "用户偏好早熟品种", "category": "preference"}]\n'
+    '[{{"fact": "用户种植新陆早77号", "category": "fact"}}, '
+    '{{"fact": "用户偏好早熟品种", "category": "preference"}}]\n'
     'category 取值: "fact"(客观事实) / "preference"(用户偏好) / '
     '"episodic"(事件经历)。\n'
     "不要输出任何解释, 只输出 JSON 数组。\n\n"
@@ -394,7 +394,13 @@ class RAGEngine:
             tokens = self._calculate_tokens(session.conversation_store)
             if tokens <= self.TARGET_L2_TOKENS or len(session.conversation_store) <= 6:
                 break
-            popped.append(session.conversation_store.pop(0))
+            # 成对弹出（user + assistant）：保证剩余历史以 user 消息开头。
+            # 若逐条弹出，剩余序列可能以 assistant 开头——部分 API 实现会因此判参数非法（400）
+            if len(session.conversation_store) >= 2:
+                popped.append(session.conversation_store.pop(0))
+                popped.append(session.conversation_store.pop(0))
+            else:
+                break
 
         if popped:
             print(f"[L2 -> L3] 弹出 {len(popped)} 条旧消息, 启动异步摘要...")
@@ -546,7 +552,9 @@ class RAGEngine:
                         else:
                             print(f"[L4 Action] NOOP: {fact}")
             except Exception as e:
+                import traceback
                 print(f"[L4 Worker] 异常: {e}")
+                traceback.print_exc()
 
         threading.Thread(target=_run, daemon=True).start()
 
@@ -596,7 +604,7 @@ class RAGEngine:
                 "type": "function",
                 "function": {
                     "name": "web_search",
-                    "description": "在互联网上搜索最新信息。当知识库中没有相关信息, 或用户询问最新政策、新闻时调用。",
+                    "description": "在互联网上搜索最新信息。当知识库中没有相关信息, 或用户询问最新政策、新闻、市场行情（如期货价格/期货行情）等实时信息时调用。",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -648,7 +656,7 @@ class RAGEngine:
                 "type": "function",
                 "function": {
                     "name": "calc_price_volatility",
-                    "description": "查询/计算中国棉花价格指数（CC Index）数据。支持：单日/单月价格查询、波动率（日/年化）、区间涨跌幅、历史价格分位。六个等级：1129B/2129B/3128B/4128B/1228B/2227B，价格单位元/吨。数据范围 2016-01 ~ 2022-12。当用户询问棉花价格、价格波动、涨跌幅、价格历史位置等问题时调用。",
+                    "description": "查询/计算中国棉花现货价格指数（CC Index）数据。支持：单日/单月价格查询、波动率（日/年化）、区间涨跌幅、历史价格分位。六个等级：1129B/2129B/3128B/4128B/1228B/2227B，价格单位元/吨。数据范围 2016-01 ~ 2026-07。当用户询问棉花现货价格、价格波动、涨跌幅、价格历史位置等问题时调用。注意：本数据为现货价格指数，不含期货行情；用户询问期货价格/期货行情时请改用 web_search。",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -688,7 +696,7 @@ class RAGEngine:
                 "type": "function",
                 "function": {
                     "name": "plot_trend",
-                    "description": "绘制新疆棉花产量/面积/亩产/价格趋势折线图，支持多地区多系列对比。数据范围：分地区 2015-2022、全区主要年份 1978-2022、价格 2016-2022。当用户要求画图、图表、趋势、走势、对比图时调用。",
+                    "description": "绘制新疆棉花产量/面积/亩产/价格趋势折线图，支持多地区多系列对比。数据范围：分地区 2015-2022、全区主要年份 1978-2022、价格 2016-2026。当用户要求画图、图表、趋势、走势、对比图时调用。",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -708,7 +716,7 @@ class RAGEngine:
                             },
                             "end": {
                                 "type": "string",
-                                "description": "结束年份（如 2022）或结束月份（price 指标时，如 2022-12）。",
+                                "description": "结束年份（如 2022）或结束月份（price 指标时，如 2026-07）。",
                             },
                             "grade": {
                                 "type": "string",
@@ -1136,10 +1144,21 @@ class RAGEngine:
     # ------------------- 组装 L1 消息 ----------------------------
 
     def _build_messages(self, question: str) -> list[dict]:
-        search_query = self._rewrite_query(question)
-        context = self.kb.retrieve_context(search_query, k=3)
+        # 截断保护：Embedding 模型（bge-large-zh）最大输入约 512 token，
+        # 过长的查询/改写结果会导致 Embedding API 返回 400（code 20015）使整条链路失败
+        search_query = self._rewrite_query(question)[:400]
+        # 降级保护：检索失败（网络/API/维度等异常）不应导致整个问答失败，退化为无上下文回答
+        try:
+            context = self.kb.retrieve_context(search_query, k=3)
+        except Exception as e:
+            print(f"[L1 组装] 知识库检索失败（降级为空上下文）: {e}")
+            context = ""
 
-        l4_facts = self.kb.retrieve_l4_memory(search_query, k=3)
+        try:
+            l4_facts = self.kb.retrieve_l4_memory(search_query, k=3)
+        except Exception as e:
+            print(f"[L1 组装] L4 记忆检索失败（降级为空）: {e}")
+            l4_facts = []
         l4_section = ""
         if l4_facts:
             print(f"[L1 组装] L4 长期记忆命中: {len(l4_facts)} 条。")
@@ -1176,8 +1195,15 @@ class RAGEngine:
         l2_rounds = len(session.conversation_store) // 2
         print(f"[L1 组装] L3: {l3_label} | L4: {l4_label} | L2 轮数: {l2_rounds}")
 
+        # 只透传 API 认识的标准字段——防御性过滤：
+        # conversation_store 的 assistant 消息还携带 "reasoning" 等扩展字段（供 UI 回显），
+        # 原样发送给上游 API 可能触发 400 参数错误（严格校验的实现会拒绝未知字段）
+        _STD_FIELDS = ("role", "content", "name", "tool_calls", "tool_call_id")
         messages: list[dict] = [{"role": "system", "content": system_content}]
-        messages.extend(session.conversation_store)
+        messages.extend(
+            {k: v for k, v in m.items() if k in _STD_FIELDS}
+            for m in session.conversation_store
+        )
         messages.append({"role": "user", "content": question})
         return messages
 

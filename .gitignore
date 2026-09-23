@@ -36,3 +36,7 @@ dist/
 # ── 工具目录 ──
 .reasonix/
 build_version.txt
+
+# ── other ──
+docs/
+tests/eval_outputs/

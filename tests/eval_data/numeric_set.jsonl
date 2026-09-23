@@ -1,0 +1,20 @@
+{"id": 1, "region": "乌鲁木齐市", "year": 2022, "metric": "yield", "expected_value": 1031.0, "unit": "吨", "source": "产量统计表"}
+{"id": 2, "region": "克拉玛依市", "year": 2021, "metric": "yield", "expected_value": 19041.0, "unit": "吨", "source": "产量统计表"}
+{"id": 3, "region": "吐鲁番市", "year": 2022, "metric": "yield", "expected_value": 11007.0, "unit": "吨", "source": "产量统计表"}
+{"id": 4, "region": "哈密市", "year": 2020, "metric": "yield", "expected_value": 28396.0, "unit": "吨", "source": "产量统计表"}
+{"id": 5, "region": "昌吉回族自治州", "year": 2022, "metric": "yield", "expected_value": 290901.0, "unit": "吨", "source": "产量统计表"}
+{"id": 6, "region": "吐鲁番市-高昌区", "year": 2019, "metric": "yield", "expected_value": 180.0, "unit": "吨", "source": "产量统计表（县级）"}
+{"id": 7, "region": "哈密市-巴里坤哈萨克自治县", "year": 2022, "metric": "yield", "expected_value": 445.0, "unit": "吨", "source": "产量统计表（县级）"}
+{"id": 8, "region": "克拉玛依市", "year": 2016, "metric": "yield", "expected_value": 10526.0, "unit": "吨", "source": "产量统计表"}
+{"id": 9, "region": "乌鲁木齐市", "year": 2022, "metric": "area", "expected_value": 0.6, "unit": "千公顷", "source": "面积统计表"}
+{"id": 10, "region": "克拉玛依市", "year": 2018, "metric": "area", "expected_value": 10.21, "unit": "千公顷", "source": "面积统计表"}
+{"id": 11, "region": "昌吉回族自治州", "year": 2022, "metric": "area", "expected_value": 145.82, "unit": "千公顷", "source": "面积统计表"}
+{"id": 12, "region": "哈密市", "year": 2022, "metric": "area", "expected_value": 18.11, "unit": "千公顷", "source": "面积统计表"}
+{"id": 13, "region": "乌鲁木齐市", "year": 2022, "metric": "mu", "expected_value": 114.6, "unit": "公斤/亩", "source": "产量÷面积计算（1031吨 / 0.6千公顷）"}
+{"id": 14, "region": "克拉玛依市", "year": 2021, "metric": "mu", "expected_value": 143.9, "unit": "公斤/亩", "source": "产量÷面积计算（19041吨 / 8.82千公顷）"}
+{"id": 15, "region": "哈密市", "year": 2020, "metric": "mu", "expected_value": 124.1, "unit": "公斤/亩", "source": "产量÷面积计算（28396吨 / 15.26千公顷）"}
+{"id": 16, "region": "昌吉回族自治州", "year": 2022, "metric": "mu", "expected_value": 133.0, "unit": "公斤/亩", "source": "产量÷面积计算（290901吨 / 145.82千公顷）"}
+{"id": 17, "region": "昌吉回族自治州", "year": 2022, "metric": "long_yield", "expected_value": 83830.0, "unit": "吨", "source": "长绒棉产量"}
+{"id": 18, "region": "乌鲁木齐市", "year": 2022, "metric": "long_yield", "expected_value": 295.0, "unit": "吨", "source": "长绒棉产量"}
+{"id": 19, "region": "全区", "year": 1985, "metric": "yield", "expected_value": 18.78, "unit": "万吨", "source": "主要年份表"}
+{"id": 20, "region": "全区", "year": 2020, "metric": "yield", "expected_value": 516.1, "unit": "万吨", "source": "主要年份表"}
