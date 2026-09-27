@@ -4,38 +4,40 @@
 ==================================
 
 【脚本功能】
-  一键运行全部评测脚本，自动汇总结果并生成评测报告 eval_report.md。
+  一键运行全部评测脚本，自动汇总结果并更新评测报告 eval_report.md。
 
 【运行内容】
   1. verify_datasets.py  —— 评测集完整性校验（格式 + 数值集与 CSV 对拍）
   2. eval_numeric.py     —— 数值一致性（工具返回值 vs 期望值，目标 100%）
   3. eval_tools.py       —— 工具选择准确率（LLM 工具决策，支持多次运行评估稳定性）
-  4. eval_retrieval.py   —— 检索质量 Hit@3 / MRR（若已实现；未实现则标注为待办）
-  5. eval_generation.py  —— 生成质量（忠实度 / 拒答率，LLM-as-judge；若已实现）
+  4. eval_retrieval.py   —— 检索质量 Hit@K / MRR（含 top-20 探针与未命中归因）
+  5. eval_generation.py  —— 生成质量（忠实度 / 拒答率 / 要点覆盖，LLM-as-judge）
 
-【实现方式】
-  - 以子进程方式运行各评测脚本（互不干扰、可独立复现）
-  - 用正则从输出中解析关键指标
-  - 完整原始输出保存到 tests/eval_outputs/（便于排查与留档）
-  - 最终生成 eval_report.md：指标总表 + 各项明细 + 优化历程 + 已知边界
+【报告生成机制：自动区块 + 人工区块分离】
+  eval_report.md 被划分为两部分：
+
+  - **自动区块**：位于 `<!-- AUTO-BEGIN -->` 与 `<!-- AUTO-END -->` 之间，
+    内容是「指标总览」与「各评测项明细」——**每次运行都会重建**。
+
+  - **人工区块**：标记之外的其余章节（优化历程 / 缺陷案例 / 已知边界 / 复现命令），
+    **运行时不触碰、由人工维护**。
+
+  这样既保留"一键重跑刷新指标"的便利，又不会覆盖需要人工撰写的分析内容。
+  若目标文件不存在，或存在但缺少标记，会先备份（eval_report.md.bak）再生成新骨架。
 
 【用法】
   .venv\\Scripts\\python.exe tests\\run_all.py            # 完整评测（工具集约 6-9 分钟）
   .venv\\Scripts\\python.exe tests\\run_all.py --quick    # 快速模式（工具集只跑 1 次，约 3 分钟）
 
 【产物】
-  - eval_report.md              评测报告（项目根目录，可随仓库提交）
+  - eval_report.md              评测报告（自动区块重建，人工区块保留）
   - tests/eval_outputs/*.txt    各评测脚本的完整输出留档
-
-【说明】
-  - 报告中的「优化历程」需人工维护（记录"改了什么 → 指标怎么变"），
-    用于追溯每次优化的依据与效果，避免凭感觉改代码。
 """
 import io
 import os
 import re
 import sys
-import json
+import shutil
 import argparse
 import subprocess
 from datetime import datetime
@@ -48,6 +50,10 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="repla
 PY = sys.executable
 OUTDIR = os.path.join("tests", "eval_outputs")
 os.makedirs(OUTDIR, exist_ok=True)
+
+REPORT = "eval_report.md"
+AUTO_BEGIN = "<!-- AUTO-BEGIN -->"
+AUTO_END = "<!-- AUTO-END -->"
 
 # ── 评测任务注册表 ────────────────────────────────────────────
 # name: 报告中的显示名；script: 脚本路径；args: 额外参数
@@ -83,8 +89,17 @@ EVALS = [
         "name": "检索质量（Hit@3 / MRR）",
         "script": "tests/eval_retrieval.py",
         "args": [],
-        "pattern": r"Hit@3: \d+/\d+ = ([\d.]+%)",
+        "pattern": r"Hit@3\s*: \d+/\d+ = ([\d.]+%)",
         "metric": "Hit@3",
+    },
+    {
+        "key": "retrieval_recall",
+        "name": "检索召回上限（Hit@20 探针）",
+        "script": "tests/eval_retrieval.py",
+        "args": [],
+        "pattern": r"Hit@20\s*: \d+/\d+ = ([\d.]+%)",
+        "metric": "Hit@20",
+        "only_pattern": True,   # 复用同一脚本输出，不重复运行
     },
     {
         "key": "generation",
@@ -96,30 +111,81 @@ EVALS = [
     },
 ]
 
+# ── 报告头部 ──────────────────────────────────────────────────
+HEADER_TEMPLATE = """# 棉花智能问答助手 · 评测报告
+"""
 
-def run_one(cfg: dict, quick: bool) -> dict:
-    """运行单个评测脚本，返回 {ok, output, metric, raw}。"""
+# ── 人工维护章节的骨架（仅在首次生成 / 缺少标记时使用）──────────
+MANUAL_SKELETON = """\
+## 三、优化历程（评测驱动迭代）
+
+<!-- 人工维护：记录"改了什么 → 指标怎么变"，用于追溯每次优化的依据与效果 -->
+
+| 日期 | 改动内容 | 效果 |
+|---|---|---|
+| — | — | — |
+
+---
+
+## 四、由评测发现的缺陷
+
+<!-- 人工维护：每个案例记录「现象 / 根因 / 修复 / 验证」 -->
+
+---
+
+## 五、已知边界与后续计划
+
+<!-- 人工维护：已知边界样本 + 待优化项（按评测项分组） -->
+
+---
+
+## 附：复现
+
+```powershell
+cd Your_path
+
+# 全部评测
+.venv\\Scripts\\python.exe tests\\run_all.py
+
+# 单项运行
+.venv\\Scripts\\python.exe tests\\verify_datasets.py          # 评测集校验
+.venv\\Scripts\\python.exe tests\\eval_numeric.py             # 数值一致性
+.venv\\Scripts\\python.exe tests\\eval_tools.py --repeat 3    # 工具选择
+.venv\\Scripts\\python.exe tests\\eval_retrieval.py           # 检索质量
+.venv\\Scripts\\python.exe tests\\eval_generation.py          # 生成质量
+```
+"""
+
+
+def run_one(cfg: dict, quick: bool, cache: dict) -> dict:
+    """运行单个评测脚本（同脚本复用缓存结果），返回 {ok, output, metric}。"""
     script = cfg["script"]
     if not os.path.exists(script):
-        return {"ok": False, "output": "", "metric": "未实现（待补）", "raw": ""}
+        return {"ok": False, "output": "", "metric": "未实现（待补）"}
 
-    args = [PY, script] + cfg["args"]
-    if not quick and cfg.get("repeat_args"):
-        args += cfg["repeat_args"]
-    print("  → 运行 %s ..." % script, flush=True)
-    try:
-        proc = subprocess.run(args, capture_output=True, text=True,
-                              encoding="utf-8", errors="replace", timeout=1800, cwd=ROOT)
-        out = (proc.stdout or "") + (proc.stderr or "")
-    except subprocess.TimeoutExpired:
-        out = "[超时] 脚本运行超过 30 分钟"
-    # 留档完整输出
-    with open(os.path.join(OUTDIR, cfg["key"] + ".txt"), "w", encoding="utf-8") as f:
-        f.write(out)
-    # 提取指标
+    # 同一脚本只跑一次（如 retrieval 与 retrieval_recall 共用输出）
+    if script in cache:
+        out = cache[script]
+    else:
+        args = [PY, script] + cfg["args"]
+        if not quick and cfg.get("repeat_args"):
+            args += cfg["repeat_args"]
+        print("  → 运行 %s ..." % script, flush=True)
+        try:
+            proc = subprocess.run(args, capture_output=True, text=True,
+                                  encoding="utf-8", errors="replace", timeout=1800, cwd=ROOT)
+            out = (proc.stdout or "") + (proc.stderr or "")
+        except subprocess.TimeoutExpired:
+            out = "[超时] 脚本运行超过 30 分钟"
+        cache[script] = out
+        # 留档完整输出
+        with open(os.path.join(OUTDIR, os.path.splitext(os.path.basename(script))[0] + ".txt"),
+                  "w", encoding="utf-8") as f:
+            f.write(out)
+
     m = re.search(cfg["pattern"], out)
     metric = m.group(1) if m else "解析失败"
-    return {"ok": True, "output": out, "metric": metric, "raw": out}
+    return {"ok": True, "output": out, "metric": metric}
 
 
 def summarize(cfg: dict, res: dict, quick: bool) -> str:
@@ -127,6 +193,9 @@ def summarize(cfg: dict, res: dict, quick: bool) -> str:
     lines = []
     if not res["ok"]:
         lines.append("- 状态：**未实现**（评测集已就绪，脚本待补）")
+        return "\n".join(lines)
+    if cfg.get("only_pattern"):
+        lines.append("- 说明：与「检索质量」同一次运行，作为**召回上限**指标（诊断瓶颈在排序还是召回）")
         return "\n".join(lines)
     lines.append("- %s：**%s**" % (cfg["metric"], res["metric"]))
     if cfg["key"] == "tools":
@@ -141,32 +210,85 @@ def summarize(cfg: dict, res: dict, quick: bool) -> str:
             lines.append("- 失败明细：")
             for l in fail_line.group(1).strip().split("\n"):
                 lines.append("  " + l.strip())
+    if cfg["key"] == "retrieval":
+        hit1 = re.search(r"Hit@1\s*: (\d+/\d+ = [\d.]+%)", res["output"])
+        mrr = re.search(r"MRR\s*: ([\d.]+)", res["output"])
+        if hit1:
+            lines.append("- Hit@1：**%s**" % hit1.group(1))
+        if mrr:
+            lines.append("- MRR：**%s**" % mrr.group(1))
+        for m in re.finditer(r"^  【.+$", res["output"], re.M):
+            lines.append("- " + m.group(0).strip())
     return "\n".join(lines)
 
 
-# ── 优化历程（人工维护：记录"改了什么 → 指标怎么变"）──────────────
-OPTIMIZATION_LOG = """\
-| 日期 | 改动内容 | 效果 |
-|---|---|---|
-| 2026-09 | 修正工具描述数据范围（价格 2016-2022 → 2016-2026，与实际数据对齐） | 避免模型误判"无数据"而拒绝调用工具 |
-| 2026-09 | 工具描述防歧义：`calc_price_volatility` 明确"仅现货指数，不含期货"；`web_search` 补充"市场行情（期货）"场景 | 工具选择准确率 **96.7% → 98.9%**；期货类问题误选工具从 2/3 次降至 0 |
-"""
+def build_auto_block(results: dict, quick: bool, now: str) -> str:
+    """构建自动区块正文（指标总览 + 各项明细）。"""
+    lines = []
+    lines.append("> **数据时间**：%s ｜ **运行模式**：%s"
+                 % (now, "快速（工具集单次）" if quick else "完整（工具集 3 次）"))
+    lines.append("> **说明**：本区块由 `tests/run_all.py` 自动重建（重跑即刷新）；"
+                 "标记之外的章节为人工维护，不受影响。")
+    lines.append("> **原始输出留档**：`tests/eval_outputs/`")
+    lines.append("")
 
-# ── 已知边界与后续计划 ────────────────────────────────────────
-KNOWN_ISSUES = """\
-| 编号 | 现象 | 归因 | 处置 |
-|---|---|---|---|
-| #4 | 复合意图（"这周适合打药吗，看下天气"）偶发漏调用 get_weather（2/3） | `get_weather` 不支持"整周"查询，且"适合打药吗"本身可用农技知识回答，模型在两可之间摇摆 | 保留为**已知边界样本**（真实系统存在此类模糊；不掩盖、可解释） |
+    lines.append("## 一、指标总览")
+    lines.append("")
+    lines.append("| 评测项 | 指标 | 结果 | 状态 |")
+    lines.append("|---|---|---|---|")
+    for cfg in EVALS:
+        res = results[cfg["key"]]
+        ok = res["ok"] and res["metric"] not in ("解析失败",)
+        status = "✅" if ok else "⚠️ 需关注"
+        lines.append("| %s | %s | %s | %s |" % (cfg["name"], cfg["metric"], res["metric"], status))
+    lines.append("")
 
-**后续计划**
-- 补检索质量评测（`eval_retrieval.py`）：Hit@3 / MRR，为后续引入混合检索 + Rerank 提供对比基线
-- 补生成质量评测（`eval_generation.py`）：LLM-as-judge 评忠实度 + 拒答准确率
-- 引入混合检索（BM25 + 向量 + RRF）与 Rerank 后，用本评测集量化提升幅度
-"""
+    lines.append("## 二、各评测项明细")
+    for cfg in EVALS:
+        if cfg.get("only_pattern"):
+            continue
+        lines.append("")
+        lines.append("### %s" % cfg["name"])
+        lines.append("")
+        lines.append(summarize(cfg, results[cfg["key"]], quick))
+    lines.append("")
+
+    return "\n".join(lines)
+
+
+def apply_to_report(auto_block: str) -> str:
+    """把自动区块写入报告，保留人工维护的其余章节。返回处理说明。"""
+    if not os.path.exists(REPORT):
+        content = (HEADER_TEMPLATE + "\n" + AUTO_BEGIN + "\n\n" + auto_block
+                   + "\n" + AUTO_END + "\n\n" + MANUAL_SKELETON)
+        with open(REPORT, "w", encoding="utf-8") as f:
+            f.write(content)
+        return "报告不存在 → 已生成新报告（含人工章节骨架）"
+
+    with open(REPORT, encoding="utf-8") as f:
+        text = f.read()
+
+    # 标记必须"独占一行"才算数 —— 防止正文中内联引用标记字面量时被误匹配
+    m_begin = re.search(r"^" + re.escape(AUTO_BEGIN) + r"\s*$", text, re.M)
+    m_end = re.search(r"^" + re.escape(AUTO_END) + r"\s*$", text, re.M)
+    if m_begin and m_end and m_end.start() > m_begin.end():
+        head = text[:m_begin.start()]
+        tail = text[m_end.end():]
+        with open(REPORT, "w", encoding="utf-8") as f:
+            f.write(head + AUTO_BEGIN + "\n\n" + auto_block + "\n" + AUTO_END + tail)
+        return "已重建自动区块（人工章节保持不变）"
+
+    shutil.copy2(REPORT, REPORT + ".bak")
+    content = (HEADER_TEMPLATE + "\n" + AUTO_BEGIN + "\n\n" + auto_block
+               + "\n" + AUTO_END + "\n\n" + MANUAL_SKELETON)
+    with open(REPORT, "w", encoding="utf-8") as f:
+        f.write(content)
+    return ("原报告缺少 AUTO 标记 → 已备份为 %s.bak 并生成新结构，"
+            "请把原有人工内容合并回来" % REPORT)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="一键运行全部评测并生成报告")
+    parser = argparse.ArgumentParser(description="一键运行全部评测并更新报告")
     parser.add_argument("--quick", action="store_true", help="快速模式（工具集只跑 1 次）")
     args = parser.parse_args()
 
@@ -174,47 +296,17 @@ def main() -> None:
     print("棉花智能问答助手 · 全量评测")
     print("=" * 60)
 
-    results = {}
+    results, cache = {}, {}
     for cfg in EVALS:
         print("\n[%s]" % cfg["name"])
-        results[cfg["key"]] = run_one(cfg, args.quick)
+        results[cfg["key"]] = run_one(cfg, args.quick, cache)
 
-    # ── 生成报告 ──
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
-    lines = []
-    lines.append("# 棉花智能问答助手 · 评测报告\n")
-    lines.append("> 生成时间：%s ｜ 运行模式：%s\n" % (now, "快速（单次）" if args.quick else "完整（工具集 3 次）"))
-    lines.append("> 本报告由 `tests/run_all.py` 自动生成；评测集与脚本位于 `tests/` 目录。\n")
-
-    lines.append("\n## 一、指标总览\n")
-    lines.append("| 评测项 | 指标 | 结果 | 状态 |")
-    lines.append("|---|---|---|---|")
-    for cfg in EVALS:
-        res = results[cfg["key"]]
-        status = "✅ 通过" if (res["ok"] and "未实现" not in res["metric"] and "解析失败" not in res["metric"]) else ("⏳ 待补" if not res["ok"] else "⚠️ 需关注")
-        lines.append("| %s | %s | %s | %s |" % (cfg["name"], cfg["metric"], res["metric"], status))
-
-    lines.append("\n## 二、各评测项明细\n")
-    for cfg in EVALS:
-        lines.append("### %s\n" % cfg["name"])
-        lines.append(summarize(cfg, results[cfg["key"]], args.quick))
-        lines.append("")
-
-    lines.append("\n## 三、优化历程（评测驱动迭代）\n")
-    lines.append(OPTIMIZATION_LOG)
-
-    lines.append("\n## 四、已知边界与后续计划\n")
-    lines.append(KNOWN_ISSUES)
-
-    lines.append("\n---\n")
-    lines.append("*报告由 run_all.py 自动生成；原始输出留档于 `tests/eval_outputs/`。*\n")
-
-    report = "\n".join(lines)
-    with open("eval_report.md", "w", encoding="utf-8") as f:
-        f.write(report)
+    auto_block = build_auto_block(results, args.quick, now)
+    note = apply_to_report(auto_block)
 
     print("\n" + "=" * 60)
-    print("报告已生成: eval_report.md")
+    print("报告已更新: %s（%s）" % (REPORT, note))
     for cfg in EVALS:
         print("  %-24s %s" % (cfg["name"], results[cfg["key"]]["metric"]))
 

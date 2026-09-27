@@ -99,6 +99,12 @@ class AppConfig:
     EMBEDDING_BASE_URL: str = os.getenv("EMBEDDING_BASE_URL", "https://api.siliconflow.cn/v1")
     EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "BAAI/bge-large-zh-v1.5")
 
+    # ── Rerank 精排配置（复用硅基流动，同一 API Key）──
+    # 开启后：向量召回 RERANK_RECALL_K 条 → CrossEncoder 精排 → 取 top-k
+    RERANK_ENABLED: bool = os.getenv("RERANK_ENABLED", "1").strip().lower() not in ("0", "false", "no", "off")
+    RERANK_MODEL: str = os.getenv("RERANK_MODEL", "BAAI/bge-reranker-v2-m3")
+    RERANK_RECALL_K: int = int(os.getenv("RERANK_RECALL_K", "20") or "20")
+
     # ── GitHub 更新检查 ──
     GITHUB_OWNER: str = os.getenv("GITHUB_OWNER", "woshihuasa")
     GITHUB_REPO: str = os.getenv("GITHUB_REPO", "cotton-agent")

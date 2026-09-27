@@ -47,7 +47,7 @@ log = logging.getLogger("ui")
 
 from config import AppConfig, resource_path
 from core.config_manager import ConfigManager
-from core.kb_builder import needs_rebuild, rebuild_knowledge_base, verify_embedding
+from core.kb_builder import plan_sync, rebuild_knowledge_base, sync_knowledge_base, verify_embedding
 from core.knowledge_base import KnowledgeBase
 from core.rag_engine import RAGEngine
 from ui.settings_dialog import SettingsDialog
@@ -751,6 +751,20 @@ class KBWorker(QThread):
         self.status_signal.emit(ok, msg)
 
 
+class KbSyncWorker(QThread):
+    """知识库增量同步线程（启动时自动更新，不卡 UI）。
+
+    与 KBWorker 的区别：优先**增量同步**（只处理发生变化的文件），
+    仅当嵌入模型变更或首次建立时，才在内部回退为全量重建。
+    """
+
+    status_signal = pyqtSignal(bool, str)  # (成功, 信息)
+
+    def run(self) -> None:
+        ok, msg = sync_knowledge_base()
+        self.status_signal.emit(ok, msg)
+
+
 class UpdateWorker(QThread):
     """GitHub 更新检查后台线程。"""
 
@@ -872,29 +886,43 @@ class CottonAgentWindow(QMainWindow):
     # ── 知识库自动构建与维护 ────────────────────────────
 
     def _ensure_knowledge_base(self, force_embedding_check: bool = False) -> None:
-        """启动后自动检测知识库状态：
+        """启动后自动检测并更新知识库：
 
         1. Embedding API 未配置/不可用 → 跳过（降级为数据工具模式）
-        2. 指纹一致且库已构建 → 就绪
-        3. 首次启动 / 文档变更 → 后台线程全量重建
+        2. 与 data/ 一致 → 就绪（静默，不打扰用户）
+        3. 文档有变化 → 后台**增量同步**（状态栏提示，通常几秒）
+        4. 首次建立 / 嵌入模型变更 → 后台**全量重建**（状态栏提示约 1 分钟）
         """
         ok, msg = verify_embedding(force=force_embedding_check)
         if not ok:
             print(f"[KB] 知识库未构建：{msg}")
             log.info("知识库未构建：%s", msg)
             return
-        if not needs_rebuild():
-            print("[KB] 知识库已就绪。")
-            log.info("知识库已就绪。")
+
+        # 事前规划：据此显示不同文案，让用户能区分"几秒"与"约一分钟"
+        plan = plan_sync()
+        mode = plan.get("mode", "none")
+        if mode == "none":
+            log.info("知识库已就绪：%s", plan.get("reason"))
             return
-        print("[KB] 检测到知识库需要构建，启动后台构建...")
-        log.info("检测到知识库需要构建，启动后台构建...")
-        self._kb_worker = KBWorker()
+
+        if mode == "incremental":
+            changed = plan["added"] + plan["updated"] + plan["removed"]
+            self.statusBar().showMessage(f"正在更新知识库（{changed} 篇内容变化）…")
+            log.info("检测到文档变化，启动增量同步：%s", plan)
+        elif plan.get("reason") == "首次建立":
+            self.statusBar().showMessage("正在准备知识库（首次使用，约需 1 分钟）…")
+            log.info("首次建立知识库：%s", plan)
+        else:
+            self.statusBar().showMessage("正在升级知识库（本次更新包含检索模型变更）…")
+            log.info("嵌入模型变更，启动全量重建：%s", plan)
+
+        self._kb_worker = KbSyncWorker()
         self._kb_worker.status_signal.connect(self._on_kb_build_finished)
         self._kb_worker.start()
 
     def _on_kb_build_finished(self, ok: bool, msg: str) -> None:
-        """构建线程完成回调（主线程）：刷新知识库引用或降级提示。"""
+        """构建/同步线程完成回调（主线程）：刷新知识库引用或降级提示。"""
         if ok:
             try:
                 self._engine.kb = KnowledgeBase()  # 刷新为已构建的库
@@ -902,13 +930,15 @@ class CottonAgentWindow(QMainWindow):
                 print(f"[KB] 刷新知识库失败: {e}")
                 log.warning("刷新知识库失败: %s", e)
             print(f"[KB] {msg}")
-            log.info("知识库构建完成：%s", msg)
+            log.info("知识库处理完成：%s", msg)
+            self.statusBar().showMessage(msg)      # 完成后消息常驻，便于用户确认结果
         else:
             print(f"[KB] {msg}")
-            log.warning("知识库构建失败：%s", msg)
+            log.warning("知识库处理失败：%s", msg)
+            self.statusBar().showMessage("知识库更新失败（不影响其他功能）")
             QMessageBox.warning(
                 self,
-                "知识库构建失败",
+                "知识库更新失败",
                 f"{msg}\n\n已降级为数据工具问答模式，产量/价格/图表等本地工具仍可用。"
                 "修复配置后重启应用将自动重试。",
             )
