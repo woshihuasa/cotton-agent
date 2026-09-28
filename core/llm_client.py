@@ -19,11 +19,18 @@ class LLMClient:
       - stream_response():    流式生成器，逐块 yield（用于 UI 实时显示）
     """
 
-    def __init__(self) -> None:
-        """初始化 OpenAI 客户端，指向 DeepSeek 的 base_url。"""
+    def __init__(self, api_key: str | None = None, base_url: str | None = None) -> None:
+        """初始化 OpenAI 客户端，指向 DeepSeek 的 base_url。
+
+        Args:
+            api_key: 可选的**实例级** API Key。Web 服务场景下由用户在页面填写、
+                经请求头透传至此，实现"用户自备 Key"；为 None 时回退全局配置
+                （桌面端行为不变）。
+            base_url: 可选的服务地址覆盖，语义同上。
+        """
         self._client = OpenAI(
-            api_key=AppConfig.DEEPSEEK_API_KEY,
-            base_url=AppConfig.DEEPSEEK_BASE_URL,
+            api_key=api_key or AppConfig.DEEPSEEK_API_KEY,
+            base_url=base_url or AppConfig.DEEPSEEK_BASE_URL,
         )
         self._model = AppConfig.DEEPSEEK_MODEL
 

@@ -17,8 +17,9 @@ a = Analysis(
     pathex=[str(ROOT)],
     binaries=[],
     datas=[
-        # 只读资产（知识库文档 + 图标 + 版本号），Windows 用分号分隔
+        # 只读资产（知识库文档 + Web 页面 + 图标 + 版本号），Windows 用分号分隔
         (str(ROOT / "data"), "data"),
+        (str(ROOT / "web"), "web"),
         (str(ROOT / "ui" / "icons"), "ui/icons"),
         (str(ROOT / "build_version.txt"), "."),
     ],
@@ -33,7 +34,11 @@ a = Analysis(
         "openai",
         "tiktoken_ext.openai_public",
         "tiktoken_ext",
+        # Web 服务（uvicorn 会动态加载 loops / protocols 等子模块）
+        "fastapi",
+        "starlette",
     ]
+    + collect_submodules("uvicorn")
     + collect_submodules("chromadb"),  # chromadb 1.x 大量动态导入（含 Rust 后端）,
     hookspath=[],
     hooksconfig={},
@@ -50,6 +55,8 @@ for pkg in [
     "chromadb_rust_bindings",
     "tiktoken", "openai", "tavily", "markdown", "pandas",
     "matplotlib", "numpy", "requests", "dotenv", "pymupdf",
+    # Web 服务（uvicorn 内部动态导入较多，整包收集更稳）
+    "fastapi", "starlette", "uvicorn", "pydantic",
 ]:
     try:
         a.datas += Tree(

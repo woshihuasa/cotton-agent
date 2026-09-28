@@ -192,8 +192,14 @@ class RAGEngine:
 
     _tokenizer: Optional["tiktoken.Encoding"] = None
 
-    def __init__(self) -> None:
-        self.llm = LLMClient()
+    def __init__(self, api_key: str | None = None) -> None:
+        """初始化引擎。
+
+        Args:
+            api_key: 可选的**实例级** LLM API Key（Web 服务"用户自备 Key"场景）。
+                为 None 时使用全局配置，桌面端行为不变。
+        """
+        self.llm = LLMClient(api_key=api_key)
         self.kb = KnowledgeBase()
 
         self.sessions: dict[str, Session] = {}

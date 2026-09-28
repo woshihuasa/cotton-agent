@@ -12,6 +12,7 @@
   - 棉花价格指数查询与波动率分析
   - 趋势折线图绘制（自动嵌入回复）
   - 产量预测区间与产区波动风险分级
+- **Web 服务**：内置 FastAPI + SSE 服务，桌面端一键启动或命令行启动后，可用浏览器（含手机、平板）访问同一套问答能力。
 
 ## 技术栈
 
@@ -21,6 +22,7 @@
 | RAG | LangChain + ChromaDB |
 | 数据处理 | pandas + numpy + matplotlib |
 | UI | PyQt6 |
+| Web 服务 | FastAPI + Uvicorn（SSE 流式输出） |
 
 ## 快速开始
 
@@ -40,6 +42,9 @@ pip install -r requirements.txt
 | `EMBEDDING_MODEL` | 向量模型名 | `BAAI/bge-large-zh-v1.5`（1024 维） |
 | `AMAP_API_KEY` | 可选。高德地图（天气查询） | — |
 | `TAVILY_API_KEY` | 可选。Tavily（联网搜索） | — |
+| `WEB_ACCESS_TOKEN` | 可选。Web 服务访问口令，**留空则不校验**（本机 / 局域网自用）；对外暴露前建议设置 | — |
+| `WEB_RATE_PER_MIN` | 可选。Web 服务单 IP 每分钟提问上限，默认 20 | — |
+| `WEB_DAILY_LIMIT` | 可选。Web 服务全站每日提问上限，默认 2000 | — |
 
 > **关于 URL**：`DEEPSEEK_BASE_URL` 与 `EMBEDDING_BASE_URL` 对所有使用同一服务商的用户是统一的（默认值即官方/硅基流动地址，通常不需要改）。仅当**更换服务商**时才需要修改——例如将 Embedding 换成 OpenAI 官方（`https://api.openai.com/v1`）或阿里百炼等兼容接口时，同步修改 URL 与模型名。
 >
@@ -62,11 +67,49 @@ pip install pyinstaller
 python build_exe.py  # 产物: dist/CottonAgent/
 ```
 
+## Web 服务（浏览器访问）
+
+除桌面端外，项目内置了一个 Web 服务，可用浏览器（含手机、平板）访问同一套问答能力。
+
+**启动方式（二选一）**：
+
+```bash
+# ① 命令行启动
+python server.py                # 默认 0.0.0.0:8000
+python server.py --port 8080    # 换端口
+```
+
+② 桌面端：**设置 → Web 服务** → 点「启动服务」；点击状态栏里的地址可直接用默认浏览器打开。
+
+**本机访问**：浏览器打开 `http://127.0.0.1:8000`。
+
+> **必须写 `http://`**：服务为纯 HTTP（无 TLS 证书）。若浏览器自动补成 `https://`，会报「发送了无效的响应 / 连接不安全」——手动改成 `http://` 即可。
+
+**局域网访问（手机 / 平板）**：
+
+1. 手机与电脑连**同一 WiFi**
+2. 浏览器打开 `http://<电脑局域网IP>:8000`（IP 见设置面板状态栏，或用 `ipconfig` 查看）
+3. 首次启动时 Windows 会弹窗询问是否允许 Python 访问网络，**需选择允许**；若已点掉，用管理员 PowerShell 补一条放行规则：
+
+```powershell
+New-NetFirewallRule -DisplayName "CottonAgent Web 8000" -Direction Inbound -LocalPort 8000 -Protocol TCP -Action Allow -Profile Private
+```
+
+**Key 与访问控制**：
+
+- **LLM Key（DeepSeek）**：由用户在网页上填写，存浏览器 `localStorage`，随请求头传入，**服务端不保存、不落盘**。
+- **Embedding**：由服务端配置提供——检索在服务端进行，且向量库与所用模型绑定。
+- **访问口令**：在 `.env` 中设置 `WEB_ACCESS_TOKEN` 后，访问者需在网页「设置」中填写同一口令；留空则不校验。
+- **限流**：单 IP 每分钟与全站每日两级上限，防止脚本刷爆服务端 Embedding 配额。
+
+> **公网部署提示**：`192.168.x.x` 是局域网私有地址，外网无法直接访问。若要对外提供服务，需部署到云服务器并配置反向代理（如 Caddy 可自动申请 HTTPS 证书）。**暴露到公网前务必设置 `WEB_ACCESS_TOKEN` 并调低限流阈值**，否则服务端的 Embedding 配额可能被刷爆。
+
 ## 项目结构
 
 ```
 cotton_agent/
-├── main.py                  # 程序入口
+├── main.py                  # 程序入口（桌面端）
+├── server.py                # Web 服务命令行入口
 ├── build_kb.py              # 知识库构建脚本（全量，兼容旧用法）
 ├── build_exe.py             # exe 打包脚本（主程序 + updater）
 ├── updater_runner.py        # 自动更新安装器（打包为 updater.exe）
@@ -74,6 +117,7 @@ cotton_agent/
 ├── updater.spec             # updater 打包配置（自动生成）
 ├── config.py                # 全局配置
 ├── core/
+│   ├── web_server.py        # Web 服务（FastAPI 路由 + 会话池 + 访问控制）
 │   ├── rag_engine.py        # RAG 引擎 + 工具循环
 │   ├── knowledge_base.py    # 向量库 + 增量索引维护 + L4 记忆
 │   ├── kb_builder.py        # 文档指纹 / 同步规划 / 全量重建
@@ -86,6 +130,7 @@ cotton_agent/
 ├── tools/
 │   └── kb_admin.py          # 知识库维护 CLI（status/sync/add/remove/list/rebuild）
 ├── ui/                      # PyQt6 界面
+├── web/                     # Web 前端页面（index.html）
 └── data/                    # RAG 文档源
 ```
 

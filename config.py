@@ -109,6 +109,13 @@ class AppConfig:
     GITHUB_OWNER: str = os.getenv("GITHUB_OWNER", "woshihuasa")
     GITHUB_REPO: str = os.getenv("GITHUB_REPO", "cotton-agent")
 
+    # ── Web 服务访问控制（公网 / 多设备场景）──
+    # WEB_ACCESS_TOKEN 留空 = 不校验口令，适合本机与家庭局域网自用；
+    # 一旦把服务暴露到公网，必须设置 —— 否则任何人都能消耗你的 Embedding 配额。
+    WEB_ACCESS_TOKEN: str = os.getenv("WEB_ACCESS_TOKEN", "")
+    WEB_RATE_PER_MIN: int = int(os.getenv("WEB_RATE_PER_MIN", "20") or "20")      # 单 IP 每分钟问答上限
+    WEB_DAILY_LIMIT: int = int(os.getenv("WEB_DAILY_LIMIT", "2000") or "2000")   # 全站每日问答上限
+
     # ── 数据与持久化路径（三区分离）──
     DATA_DIR: str = str(resource_path("data"))              # 只读知识库文档
     CHROMA_DB_PATH: str = str(app_data_dir() / "chroma_db")  # 向量库（可重建）
@@ -123,6 +130,7 @@ _RUNTIME_KEYS = (
     "AMAP_API_KEY", "TAVILY_API_KEY",
     "EMBEDDING_API_KEY", "EMBEDDING_BASE_URL", "EMBEDDING_MODEL",
     "GITHUB_OWNER", "GITHUB_REPO",
+    "WEB_ACCESS_TOKEN",     # 限流参数改动频率低，重启生效即可，不在此热更新
 )
 
 

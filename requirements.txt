@@ -31,5 +31,9 @@ tiktoken>=0.7.0
 tavily-python>=0.5.0
 requests>=2.31.0
 
+# ── Web 服务（server.py；仅启动 Web 服务时需要，桌面端不必装）──
+fastapi>=0.110.0
+uvicorn>=0.30.0
+
 # ── 打包（可选：仅构建 exe 时需要）──
 # pyinstaller>=6.0
