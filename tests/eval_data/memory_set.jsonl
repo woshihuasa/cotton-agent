@@ -1,0 +1,45 @@
+{"type": "seed", "note": "retrieval 用例共用的记忆库种子（模拟一个已积累的真实用户画像）", "facts": ["用户在南疆阿克苏地区有100亩滴灌棉田", "用户在阿拉尔有20亩滴灌棉田", "用户棉田主栽品种是塔河2号", "用户辅栽品种是新陆中87号", "用户棉花目标品质为双29和3128B", "用户棉田在4月上旬播种", "用户棉田在7月底打顶", "用户棉田在8月31日停水", "用户花铃期滴灌3—4次，每次30—35方/亩", "用户全季滴灌用水量为280—320方/亩", "用户基肥施用复合肥40—50公斤/亩和有机肥100公斤/亩", "用户随水滴施高钾水溶肥3—5公斤/亩", "用户叶面喷施1%尿素加0.5%磷酸二氢钾", "用户防治红蜘蛛使用螺螨酯", "用户防治棉铃虫使用氯虫苯甲酰胺", "用户防治枯黄萎病使用生物菌剂", "用户忌用粉剂和乳油类农药", "用户施药时间宜在傍晚或上午10点前", "用户在吐絮率40%且晴天时用噻苯隆加乙烯利脱叶", "用户计划10月中下旬进行机械采收", "用户目标籽棉产量为380—420公斤/亩", "用户棉田存在盐碱问题", "用户雨后进行中耕防板结", "用户面临水权约束", "用户干旱时补灌不超过10方/亩", "用户忌漫灌"]}
+{"id": 1, "type": "conflict", "old": "用户配种长绒棉", "new": "用户配置种植长绒棉", "expected": ["NOOP"], "note": "真实失败样本：近义改写"}
+{"id": 2, "type": "conflict", "old": "用户10月中下旬机采", "new": "用户长期目标是10月中下旬机采", "expected": ["NOOP"], "note": "真实失败样本：加限定词但信息未变"}
+{"id": 3, "type": "conflict", "old": "用户计划8月31日停水", "new": "用户8月31日停水", "expected": ["NOOP", "UPDATE"], "note": "真实失败样本：计划↔陈述互转"}
+{"id": 4, "type": "conflict", "old": "用户计划9月底测产", "new": "用户计划9月底进行测产", "expected": ["NOOP"], "note": "真实失败样本：同指数字口径"}
+{"id": 5, "type": "conflict", "old": "用户在花铃期随水滴施高钾水溶肥3—5公斤/亩", "new": "用户花铃期追施高钾3—5公斤/次", "expected": ["NOOP", "UPDATE"], "note": "真实失败样本：近义改写"}
+{"id": 6, "type": "conflict", "old": "用户在南疆阿克苏地区有100亩滴灌棉田", "new": "用户的100亩滴灌棉田位于阿克苏", "expected": ["NOOP"], "note": "语序调整，信息相同"}
+{"id": 7, "type": "conflict", "old": "用户主栽塔河2号", "new": "用户以塔河2号为主栽品种", "expected": ["NOOP"], "note": "近义改写"}
+{"id": 8, "type": "conflict", "old": "用户忌用粉剂和乳油", "new": "用户避免使用粉剂、乳油类农药", "expected": ["NOOP"], "note": "近义改写"}
+{"id": 9, "type": "conflict", "old": "用户目标籽棉产量为380—420公斤/亩", "new": "用户亩产目标为籽棉380至420公斤", "expected": ["NOOP"], "note": "近义改写（数字相同）"}
+{"id": 10, "type": "conflict", "old": "用户在吐絮率40%后使用噻苯隆和乙烯利脱叶", "new": "用户吐絮率40%时用噻苯隆加乙烯利进行脱叶", "expected": ["NOOP"], "note": "近义改写"}
+{"id": 11, "type": "conflict", "old": "用户主栽品种是塔河2号", "new": "用户已改种新陆早77号", "expected": ["UPDATE"], "note": "真·品种更换"}
+{"id": 12, "type": "conflict", "old": "用户有100亩棉田", "new": "用户棉田已扩大到150亩", "expected": ["UPDATE"], "note": "真·面积变化"}
+{"id": 13, "type": "conflict", "old": "用户计划10月中旬机采", "new": "用户已于10月12日完成机械采收", "expected": ["UPDATE"], "note": "真·计划变为已执行"}
+{"id": 14, "type": "conflict", "old": "用户的20亩地块种植长绒棉", "new": "用户的20亩地块改种细绒棉", "expected": ["UPDATE"], "note": "真·作物变更"}
+{"id": 15, "type": "conflict", "old": "用户计划8月底停水", "new": "用户停水时间改为9月10日", "expected": ["UPDATE"], "note": "真·时间变更"}
+{"id": 16, "type": "conflict", "old": "用户亩产目标为380—420公斤", "new": "用户亩产目标下调至350—380公斤", "expected": ["UPDATE"], "note": "真·目标变更（数字不同）"}
+{"id": 17, "type": "conflict", "old": "用户的滴灌带滴头流量为2.0升/小时", "new": "用户已更换滴灌带，滴头流量改为1.6升/小时", "expected": ["UPDATE"], "note": "真·设备参数变更"}
+{"id": 18, "type": "conflict", "old": "用户主栽塔河2号，辅栽新陆中87号", "new": "用户主栽品种改为新陆中87号", "expected": ["UPDATE"], "note": "真·主辅对调"}
+{"id": 19, "type": "conflict", "old": "用户拥有20亩棉田", "new": "用户偏好傍晚施药", "expected": ["ADD"], "note": "真·不同属性"}
+{"id": 20, "type": "conflict", "old": "用户的阿克苏地块主栽塔河2号", "new": "用户的阿拉尔地块种植长绒棉", "expected": ["ADD"], "note": "真·不同对象"}
+{"id": 21, "type": "conflict", "old": "用户采用滴灌", "new": "用户使用合规地膜", "expected": ["ADD"], "note": "真·不同属性"}
+{"id": 22, "type": "conflict", "old": "用户防治棉铃虫使用氯虫苯甲酰胺", "new": "用户防治蚜虫使用吡虫啉", "expected": ["ADD"], "note": "真·不同防治对象"}
+{"id": 23, "type": "conflict", "old": "用户4月上旬播种", "new": "用户7月底打顶", "expected": ["ADD"], "note": "真·不同农事环节"}
+{"id": 24, "type": "conflict", "old": "用户全季滴灌280—320方/亩", "new": "用户基肥施用复合肥40—50公斤/亩", "expected": ["ADD"], "note": "真·不同属性（灌溉 vs 施肥）"}
+{"id": 25, "type": "conflict", "old": "用户棉田存在盐碱问题", "new": "用户棉田面临水权约束", "expected": ["ADD"], "note": "真·不同约束"}
+{"id": 26, "type": "conflict", "old": "用户计划10月售棉", "new": "用户取消了售棉计划", "expected": ["DELETE", "UPDATE"], "note": "真·计划取消"}
+{"id": 27, "type": "conflict", "old": "用户计划购买植保无人机", "new": "用户不打算购买植保无人机了", "expected": ["DELETE", "UPDATE"], "note": "真·计划放弃"}
+{"id": 28, "type": "conflict", "old": "用户计划扩种到200亩", "new": "用户放弃扩种计划", "expected": ["DELETE", "UPDATE"], "note": "真·计划放弃"}
+{"id": 101, "type": "dedup", "scenario": "同一事实被反复提及（4 种措辞）", "steps": [{"fact": "用户有100亩滴灌棉田", "expect": "ADD"}, {"fact": "用户拥有100亩滴灌棉田", "expect": "NOOP"}, {"fact": "用户的100亩棉田采用滴灌", "expect": "NOOP"}, {"fact": "用户经营着100亩滴灌棉田", "expect": "NOOP"}], "expected_final": 1, "boundary": false}
+{"id": 102, "type": "dedup", "scenario": "两个不同事实各提 3 次", "steps": [{"fact": "用户主栽塔河2号", "expect": "ADD"}, {"fact": "用户7月底打顶", "expect": "ADD"}, {"fact": "用户以塔河2号为主栽品种", "expect": "NOOP"}, {"fact": "用户棉田于7月底打顶", "expect": "NOOP"}, {"fact": "用户的主栽品种是塔河2号", "expect": "NOOP"}, {"fact": "用户打顶时间为7月底", "expect": "NOOP"}], "expected_final": 2, "boundary": false}
+{"id": 103, "type": "dedup", "scenario": "事实演进（品种 A → B），应 UPDATE 而非新增", "steps": [{"fact": "用户主栽塔河2号", "expect": "ADD"}, {"fact": "用户主栽塔河2号", "expect": "NOOP"}, {"fact": "用户已改种新陆早77号", "expect": "UPDATE"}, {"fact": "用户的主栽品种是新陆早77号", "expect": "NOOP"}], "expected_final": 1, "expected_present": ["用户已改种新陆早77号"], "boundary": false, "note": "第 3 步应当 UPDATE 掉旧品种；若只 ADD 则最终 2 条（旧品种仍残留）"}
+{"id": 104, "type": "dedup", "scenario": "两条不同地块的事实 + 一条派生总量，**不得互相覆盖**", "steps": [{"fact": "用户在阿克苏有100亩滴灌棉田", "expect": "ADD"}, {"fact": "用户在阿拉尔有20亩滴灌棉田", "expect": "ADD"}, {"fact": "用户共有120亩滴灌棉田", "expect": "ADD"}], "expected_final": 3, "expected_present": ["用户在阿克苏有100亩滴灌棉田", "用户在阿拉尔有20亩滴灌棉田"], "boundary": true, "note": "**数据安全用例**：曾实测到把『阿克苏100亩』原地 UPDATE 成『阿拉尔20亩』——静默销毁一条真实事实（短板 #23）。硬性要求是 expected_present 两条**都必须仍在库中**（已由在线要素闸保证）。派生总量『共120亩』是否应去重属开放问题，本用例允许其新增，故标 boundary 不计入去重率"}
+{"id": 201, "type": "retrieval", "query": "我有多少亩棉田", "expected": ["用户在南疆阿克苏地区有100亩滴灌棉田", "用户在阿拉尔有20亩滴灌棉田"], "note": "面积类"}
+{"id": 202, "type": "retrieval", "query": "我种的是什么品种", "expected": ["用户棉田主栽品种是塔河2号", "用户辅栽品种是新陆中87号"], "note": "品种类（主栽与辅栽都算正确）"}
+{"id": 203, "type": "retrieval", "query": "什么时候打顶", "expected": ["用户棉田在7月底打顶"], "note": "农事时间"}
+{"id": 204, "type": "retrieval", "query": "红蜘蛛用什么药", "expected": ["用户防治红蜘蛛使用螺螨酯"], "note": "病虫害防治"}
+{"id": 205, "type": "retrieval", "query": "滴灌一共用多少水", "expected": ["用户全季滴灌用水量为280—320方/亩"], "note": "灌溉定额"}
+{"id": 206, "type": "retrieval", "query": "基肥怎么施", "expected": ["用户基肥施用复合肥40—50公斤/亩和有机肥100公斤/亩"], "note": "施肥"}
+{"id": 207, "type": "retrieval", "query": "什么时候停水", "expected": ["用户棉田在8月31日停水"], "note": "灌溉节点"}
+{"id": 208, "type": "retrieval", "query": "什么时候脱叶", "expected": ["用户在吐絮率40%且晴天时用噻苯隆加乙烯利脱叶"], "note": "脱叶催熟"}
+{"id": 209, "type": "retrieval", "query": "目标产量是多少", "expected": ["用户目标籽棉产量为380—420公斤/亩"], "note": "产量目标"}
+{"id": 210, "type": "retrieval", "query": "喷施什么叶面肥", "expected": ["用户叶面喷施1%尿素加0.5%磷酸二氢钾"], "note": "叶面肥"}
+{"id": 211, "type": "retrieval", "query": "我的地有什么问题", "expected": ["用户棉田存在盐碱问题", "用户面临水权约束"], "note": "限制条件"}
+{"id": 212, "type": "retrieval", "query": "什么时候播种", "expected": ["用户棉田在4月上旬播种"], "note": "播种时间"}

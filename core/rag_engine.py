@@ -28,33 +28,21 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Generator, Optional
 
-import requests
 import tiktoken
 
 log = logging.getLogger("rag")
 
 from config import AppConfig
-from core.cotton_price import (
-    calc_percentile,
-    calc_pct_change,
-    calc_volatility,
-    monthly_series,
-    query_price,
-)
-from core.cotton_stats import (
-    aggregate,
-    calc_mu,
-    list_regions,
-    list_years,
-    query_major,
-    query_value,
-    rank_by_year,
-    series_by_year,
-)
 from core.knowledge_base import KnowledgeBase
 from core.llm_client import LLMClient
-from core.trend_plot import generate_trend_chart, next_chart_path
-from core.yield_analysis import forecast_yield, risk_ranking
+from core.tools import TOOL_SCHEMAS, execute_tool
+from core.user_memory import NullMemoryStore, UserMemoryStore
+
+
+# ---------------------------------------------------------------------------
+# 工具结果 JSON 序列化
+# ---------------------------------------------------------------------------
+
 
 # ---------------------------------------------------------------------------
 # 系统提示词常量
@@ -92,6 +80,30 @@ SYSTEM_PROMPT = (
     "\"该预测基于历史趋势的统计外推, 仅供参考\".\n"
     "2. risk 操作返回产区波动风险分级表, 直接以 Markdown 表格呈现给用户.\n"
     "3. region 参数必须使用用户原话中的地区名, 不要自行替换或联想其他地区.\n\n"
+    "【回答质量约束】(以下四条对所有回答生效, 优先级高于上面的工具规则):\n"
+    "1. 数据一致性: 回答中引用的任何数字都必须与工具返回或【背景知识】严格一致, "
+    "不得改写口径、不得改变量级、不得前后矛盾. "
+    "若同一回答中引用了多处数据, 务必自行核对彼此不冲突; "
+    "确实无法调和的冲突, 就不要同时呈现, 并说明数据口径差异.\n"
+    "2. 完整性: 回答前先逐项确认问题里的**每一项要求**都已回应. "
+    "凡问题中出现「给建议」「怎么办」「如何」「有什么风险」等字样, "
+    "除数据与结论外**必须给出对应的建议段落**, 不得只给数据就结束. "
+    "同时注意不要被截断: 宁可精简中间展开, 也要保证结尾完整.\n"
+    "3. 合规边界(重要), 分两类处理, **不要混为一谈**:\n"
+    "   (a) 询问**行情位置与决策倾向**——如「现在价格算高吗」「该不该囤货」"
+    "「什么时候卖合适」: 可以回答, 但**只陈述客观事实与风险因素**"
+    "(如历史分位、波动率、供需与政策情况), "
+    "**不得给出买卖建议、不得预测涨跌、不得建议仓位**, "
+    "结尾说明「以上为客观数据与风险因素, 不构成投资建议」.\n"
+    "   (b) 询问**具体交易操作**——如「套期保值具体怎么操作」「保证金比例多少」"
+    "「怎么开户」「多少手」「买卖点位」: 这**超出本助手的能力范围**"
+    "(本助手面向棉花种植, 不具备期货交易与投资顾问资质), "
+    "应**明确说明无法提供此类操作指导**, 可建议用户咨询具备资质的期货机构, "
+    "并回到种植相关的可答话题. **不得**因为联网搜到了资料就代为给出操作步骤.\n"
+    "4. 能力边界: 与新疆棉花种植无关的问题(如加密货币、股票、其他作物等), "
+    "应说明本助手只覆盖新疆棉花种植与产业信息, 无法回答, 不要勉强作答.\n"
+    "5. 收尾: 所有工具调用完成后, 必须输出一段完整的最终文字回答; "
+    "不得以工具调用记录、原始 JSON 或纯数据罗列作为回答的结尾.\n\n"
     "{summary_section}"
     "{l4_section}"
     "【背景知识】:\n{context}"
@@ -130,17 +142,101 @@ L4_EXTRACT_PROMPT = (
 
 L4_CONFLICT_PROMPT = (
     "你是一个记忆冲突消解助手。\n\n"
-    "给定一条【旧记忆】和一条【新候选事实】, "
-    "判断应该执行什么操作。\n\n"
-    "判断规则:\n"
-    '- ADD: 新旧不冲突且新事实是有效的补充信息。\n'
-    '- UPDATE: 新事实更新或纠正了旧记忆 (如品种变了、地址换了)。\n'
-    '- DELETE: 旧记忆已过时或与新事实直接矛盾且新事实更可信。\n'
-    '- NOOP: 新事实和旧记忆实质相同, 无需改动。\n\n'
-    '只输出一个单词: ADD / UPDATE / DELETE / NOOP。\n\n'
-    "【旧记忆】: {old_memory}\n"
-    "【新候选】: {new_fact}"
+    "下面是【候选旧记忆】(按相关度排序) 和一条【新候选事实】。\n"
+    "请判断应该执行什么操作。\n\n"
+    "**重要: 候选是按语义相似度排序的, 语义相近不代表是同一个属性。**\n"
+    "请逐条判断「讲的是不是同一个属性槽位」, 不要因为措辞像就认为是同一条。\n\n"
+    "判断规则 (按顺序判断, 命中即返回):\n"
+    "- NOOP: 某条候选与新事实讲的是**同一件事**, 只是措辞 / 详略 / 语序不同。\n"
+    '    · 近义改写: "用户配种长绒棉" 与 "用户配置种植长绒棉"\n'
+    '    · 加限定词但信息未变: "用户10月中下旬机采" 与 "用户长期目标是10月中下旬机采"\n'
+    '    · 计划与陈述互转: "用户计划8月31日停水" 与 "用户8月31日停水"\n'
+    "  **关键: 更详细不等于新信息。**\n"
+    "- UPDATE n: 第 n 条候选与新事实是**同一个属性**, 但取值变了。\n"
+    '    · 品种更换: "主栽品种是塔河2号" 与 "已改种新陆早77号"  → 同一属性(品种)\n'
+    '    · 时间变更: "计划8月底停水" 与 "停水时间改为9月10日"    → 同一属性(停水时间)\n'
+    '    · 计划取消: "计划10月售棉" 与 "取消了售棉计划"          → 同一属性(售棉计划)\n'
+    "- DELETE n: 第 n 条候选被明确否定, 且新事实未给出替代取值。\n"
+    "- ADD: **所有候选**讲的都是不同属性或**不同对象**, 新事实应作为补充新增。\n"
+    '    · **不同对象必须判 ADD**: "在阿克苏有100亩滴灌棉田" 与 "在阿拉尔有20亩滴灌棉田"\n'
+    "      是两块不同的地, 绝不能 UPDATE —— 那会抹掉其中一条。\n\n"
+    "输出格式 (只输出一行, 不要解释):\n"
+    "    ADD          —— 新增\n"
+    "    NOOP         —— 无需改动\n"
+    "    UPDATE n     —— 用新事实替换第 n 条候选\n"
+    "    DELETE n     —— 删除第 n 条候选\n\n"
+    "【候选旧记忆】\n{candidates}\n\n"
+    "【新候选事实】\n{new_fact}"
 )
+
+
+def _parse_l4_decision(raw: str | None) -> tuple[str, int | None]:
+    """从 LLM 回复中解析冲突消解动作 → (action, candidate_index)。
+
+    只认**首个词**（并剥离标点），避免把解释性文字里的关键词误当动作——
+    例如 "应 NOOP, 不应 ADD" 用旧的子串匹配会命中 ADD 而判反。
+
+    Args:
+        raw: LLM 原始回复。
+
+    Returns:
+        (action, index)。action ∈ {ADD, UPDATE, DELETE, NOOP}；
+        index 为 **1-based** 候选序号，仅 UPDATE / DELETE 有意义，未给出时为 None。
+
+    解析失败一律回退 ("NOOP", None)：当前主要风险是记忆**过度膨胀**（短板 #19）
+    与**误写销毁事实**（短板 #23），因此"不写"比"误写"更保守。
+    """
+    if not raw:
+        return "NOOP", None
+    parts = raw.strip().split()
+    if not parts:
+        return "NOOP", None
+
+    token = parts[0].strip(".,:;!?*`\"'()[]{}，。：；！？、（）【】").upper()
+    if token not in ("ADD", "UPDATE", "DELETE", "NOOP"):
+        return "NOOP", None
+
+    index: int | None = None
+    if token in ("UPDATE", "DELETE"):
+        # 容忍 "UPDATE 2" / "UPDATE #2" / "UPDATE 第2条" / "UPDATE 2." 等写法
+        for p in parts[1:4]:
+            digits = "".join(ch for ch in p if ch.isdigit())
+            if digits:
+                index = int(digits)
+                break
+    return token, index
+
+
+# 每次冲突消解交给 LLM 的候选条数。取 5 是经验值：既能让"同属性但取值变了"
+# 的低相似度候选（余弦 0.4~0.6）进入判定，又不至于把无关事实灌进 prompt。
+_L4_CANDIDATE_K = 5
+
+
+# 「不同对象」判定用的地区/地块标识。
+# 用途：在线 UPDATE/DELETE 前的**要素闸**——地区标识互斥时拒绝覆盖。
+# 为什么不能改用「数字闸」：品种名里就带数字（塔河2号 → 新陆早77号），
+# 数字集互不为子集，会把**真正该 UPDATE** 的品种变更误拦。
+_L4_REGION_TOKENS = (
+    "阿克苏", "阿拉尔", "喀什", "库尔勒", "石河子", "沙湾", "精河", "阿瓦提",
+    "和田", "吐鲁番", "哈密", "昌吉", "博尔塔拉", "塔城", "伊犁", "巴音郭楞",
+    "克孜勒苏", "乌鲁木齐", "克拉玛依", "图木舒克", "五家渠", "北屯", "铁门关",
+    "双河", "可克达拉", "昆玉", "胡杨河", "新星", "南疆", "北疆", "东疆",
+)
+
+
+def _different_object(a: str, b: str) -> bool:
+    """两条事实是否明确指向**不同地区/地块**（要素闸）。
+
+    E4 实测到：「用户在阿克苏有100亩滴灌棉田」被原地 UPDATE 成
+    「用户在阿拉尔有20亩滴灌棉田」—— 静默销毁一条真实事实（短板 #23）。
+    本闸门在写入前拦下这类覆盖，降级为 ADD。
+
+    只在**双方都出现地区标识且完全不重叠**时判为不同对象；
+    一方无地区标识（或两者同地区、只是取值变了）则不拦，放行 UPDATE。
+    """
+    ra = {t for t in _L4_REGION_TOKENS if t in a}
+    rb = {t for t in _L4_REGION_TOKENS if t in b}
+    return bool(ra and rb and ra.isdisjoint(rb))
 
 L3_COMPRESS_PROMPT = (
     "请将以下多段历史摘要合并并二次压缩，"
@@ -192,15 +288,42 @@ class RAGEngine:
 
     _tokenizer: Optional["tiktoken.Encoding"] = None
 
-    def __init__(self, api_key: str | None = None) -> None:
+    def __init__(
+        self,
+        api_key: str | None = None,
+        user_data_dir: str | Path | None = None,
+        owns_user_data: bool = True,
+    ) -> None:
         """初始化引擎。
 
         Args:
             api_key: 可选的**实例级** LLM API Key（Web 服务"用户自备 Key"场景）。
                 为 None 时使用全局配置，桌面端行为不变。
+            user_data_dir: **用户数据作用域**。None = 生产路径（桌面端，行为不变）；
+                传入目录则会话存档与记忆库都落在该目录下——用于评测沙箱或
+                将来的多用户隔离。
+            owns_user_data: 本引擎是否**拥有**该用户的数据。桌面端 True（默认）；
+                Web 服务多访客场景传 False ——此时会话不落盘、L4 使用
+                `NullMemoryStore`，既不读写生产库也不产生额外外泄面。
+                详见 ROADMAP「用户数据隔离 S2」。
         """
         self.llm = LLMClient(api_key=api_key)
-        self.kb = KnowledgeBase()
+        self.kb = KnowledgeBase()        # 公共知识库（只读、可重建、可共享）
+
+        # ---- 用户数据作用域 ----
+        _scope = Path(user_data_dir) if user_data_dir else None
+        self._owns_user_data = bool(owns_user_data)
+        self._user_data_dir = _scope
+        self._session_file = (
+            (_scope / "session_state.json") if _scope
+            else Path(AppConfig.SESSION_FILE_PATH)
+        )
+
+        if not self._owns_user_data:
+            self.memory = NullMemoryStore()      # 不记忆（Web）
+        else:
+            _mem_path = str(_scope / "chroma_user_memory") if _scope else None
+            self.memory = UserMemoryStore(db_path=_mem_path)
 
         self.sessions: dict[str, Session] = {}
         self.current_session_id: str = ""
@@ -208,6 +331,16 @@ class RAGEngine:
         self._lock = threading.Lock()
 
         self._load_session_state()
+
+    @property
+    def owns_user_data(self) -> bool:
+        """本引擎是否拥有用户数据（供隔离验证与日志使用）。"""
+        return self._owns_user_data
+
+    @property
+    def session_file(self) -> Path:
+        """当前会话存档路径（供隔离验证使用）。"""
+        return self._session_file
 
     # ------------------- Token 计算 -------------------------------
 
@@ -230,7 +363,11 @@ class RAGEngine:
     # ------------------- 会话持久化 ------------------------------
 
     def _load_session_state(self) -> None:
-        sp = Path(AppConfig.SESSION_FILE_PATH)
+        if not self._owns_user_data:
+            # Web 模式：会话仅存在于内存，不读取也不写入任何存档
+            print("[Session] 本引擎不拥有用户数据 —— 跳过会话存档恢复。")
+            return
+        sp = self._session_file
         if not sp.exists():
             print("[Session] 未找到存档，从零开始。")
             return
@@ -265,6 +402,8 @@ class RAGEngine:
 
     def _save_session_state(self) -> None:
         """保存所有会话状态到 JSON 文件。调用方必须持有 self._lock。"""
+        if not self._owns_user_data:
+            return          # Web 模式：会话仅存在于内存
         data = {
             "current_session_id": self.current_session_id,
             "sessions": {
@@ -278,7 +417,7 @@ class RAGEngine:
             },
         }
         try:
-            Path(AppConfig.SESSION_FILE_PATH).write_text(
+            self._session_file.write_text(
                 json.dumps(data, ensure_ascii=False, indent=2), "utf-8")
         except OSError as e:
             print(f"[Session] 保存失败: {e}")
@@ -344,7 +483,7 @@ class RAGEngine:
             self._save_session_state()
         # 清理该会话的向量化摘要（锁外网络请求）
         try:
-            self.kb.clear_session_summaries(session_id)
+            self.memory.clear_session_summaries(session_id)
         except Exception as e:
             print(f"[Session] 清理向量化摘要失败: {e}")
         print(f"[Session] 删除: {session_id[:8]}...")
@@ -443,7 +582,7 @@ class RAGEngine:
                         self._save_session_state()
                     # L3 向量化：将新摘要段存入向量库（锁外网络请求，可语义检索历史情节）
                     try:
-                        self.kb.add_session_summary(sid, summary)
+                        self.memory.add_session_summary(sid, summary)
                     except Exception as e:
                         print(f"[L3 向量化] 摘要存储失败: {e}")
 
@@ -467,7 +606,7 @@ class RAGEngine:
                                     self._save_session_state()
                             # 压缩后的全局视角同样向量化存储
                             try:
-                                self.kb.add_session_summary(sid, compressed, category="summary_compressed")
+                                self.memory.add_session_summary(sid, compressed, category="summary_compressed")
                             except Exception as e:
                                 print(f"[L3 向量化] 压缩摘要存储失败: {e}")
             except Exception as e:
@@ -476,6 +615,83 @@ class RAGEngine:
         threading.Thread(target=_run, daemon=True).start()
 
     # ------------------- L4 实时维护 -------------------------
+
+    def resolve_memory_fact(self, fact: str, category: str = "fact") -> str:
+        """对**单条**候选事实执行冲突消解并落库，返回实际执行的动作。
+
+        这是 L4 写入路径的**唯一实现**——`_start_memory_worker` 与
+        `tests/eval_memory.py`（E4 记忆评测集）都调用它，
+        确保评测验证的是生产代码本身，而不是一份复制的逻辑。
+
+        【流程】候选检索(top-K, 无硬阈值) → LLM 判定 → 越界防护 → 要素闸 → 落库
+
+        为什么是 **top-K + 无硬阈值**：旧实现用 `1/(1+L2²) >= 0.7`（等价余弦 0.786）
+        当闸门，导致"同属性但取值变了"的情形（品种更换 0.51 / 计划取消 0.51 /
+        放弃扩种 0.42）**永远进不了判定**，直接新增——这是记忆膨胀的结构性主因
+        （ROADMAP 短板 #22）。相似度现降级为**排序信号**。
+
+        Returns:
+            "ADD" / "UPDATE" / "DELETE" / "NOOP"
+        """
+        candidates = self.memory.search_l4_candidates(fact, k=_L4_CANDIDATE_K)
+        if not candidates:
+            # 库中无任何记忆（冷启动）——无物可比，直接新增且不消耗 LLM 调用
+            self.memory.add_l4_memory(fact, category)
+            print(f"[L4 Action] ADD: {fact} ({category})")
+            return "ADD"
+
+        listing = "\n".join(f"{i + 1}. {text}" for i, (_, text, _) in enumerate(candidates))
+        decision_raw = self.llm.generate_response([{
+            "role": "user",
+            "content": L4_CONFLICT_PROMPT.format(candidates=listing, new_fact=fact),
+        }])
+        action, index = _parse_l4_decision(decision_raw)
+
+        if action in ("UPDATE", "DELETE"):
+            target = self._pick_l4_candidate(candidates, index)
+            if target is None:
+                # 越界或未给序号且候选多于一条 → 保守放弃（宁可陈旧，不可写错）
+                print(f"[L4 Action] NOOP (候选序号无效: {decision_raw!r}): {fact}")
+                return "NOOP"
+            tgt_id, tgt_text = target
+
+            # 要素闸：对象不同则拒绝覆盖（防「阿克苏100亩」被「阿拉尔20亩」抹掉）
+            if _different_object(tgt_text, fact):
+                self.memory.add_l4_memory(fact, category)
+                print(f"[L4 Action] ADD (要素闸·对象不同): {fact} ({category})")
+                return "ADD"
+
+            if action == "DELETE":
+                self.memory.delete_l4_memory(tgt_id)
+                print(f"[L4 Action] DELETE: {tgt_text}")
+            else:
+                self.memory.update_l4_memory(tgt_id, fact)
+                print(f"[L4 Action] UPDATE: {tgt_text} -> {fact}")
+            return action
+
+        if action == "ADD":
+            self.memory.add_l4_memory(fact, category)
+            print(f"[L4 Action] ADD (conflict): {fact} ({category})")
+            return "ADD"
+
+        print(f"[L4 Action] NOOP: {fact}")
+        return "NOOP"
+
+    @staticmethod
+    def _pick_l4_candidate(
+        candidates: list[tuple[str, str, float]], index: int | None,
+    ) -> tuple[str, str] | None:
+        """按 LLM 给出的 1-based 序号取候选；序号缺失或越界时返回 None。
+
+        缺失时**仅当候选唯一**才接受（此时无歧义）；多条候选却未指定序号 → 放弃，
+        而不是猜一个——错 UPDATE 会销毁事实（短板 #23）。
+        """
+        if index is None:
+            return (candidates[0][0], candidates[0][1]) if len(candidates) == 1 else None
+        if 1 <= index <= len(candidates):
+            c = candidates[index - 1]
+            return c[0], c[1]
+        return None
 
     def _start_memory_worker(self, current_q: str, current_a: str) -> None:
         sid = self.current_session_id  # 捕获当前会话 ID
@@ -536,27 +752,7 @@ class RAGEngine:
                         continue
                     if category not in ("fact", "preference", "episodic"):
                         category = "fact"
-                    old_id, old_text = self.kb.search_l4_for_conflict(fact)
-                    if old_id is None:
-                        self.kb.add_l4_memory(fact, category)
-                        print(f"[L4 Action] ADD: {fact} ({category})")
-                    else:
-                        decision_raw = self.llm.generate_response([{
-                            "role": "user",
-                            "content": L4_CONFLICT_PROMPT.format(old_memory=old_text, new_fact=fact),
-                        }])
-                        decision = decision_raw.strip().upper() if decision_raw else "NOOP"
-                        if "UPDATE" in decision:
-                            self.kb.update_l4_memory(old_id, fact)
-                            print(f"[L4 Action] UPDATE: {old_text} -> {fact}")
-                        elif "DELETE" in decision:
-                            self.kb.delete_l4_memory(old_id)
-                            print(f"[L4 Action] DELETE: {old_text}")
-                        elif "ADD" in decision:
-                            self.kb.add_l4_memory(fact, category)
-                            print(f"[L4 Action] ADD (conflict): {fact} ({category})")
-                        else:
-                            print(f"[L4 Action] NOOP: {fact}")
+                    self.resolve_memory_fact(fact, category)
             except Exception as e:
                 import traceback
                 print(f"[L4 Worker] 异常: {e}")
@@ -583,569 +779,25 @@ class RAGEngine:
 
     @staticmethod
     def _get_local_tool_schemas() -> list[dict]:
-        """返回 DeepSeek/OpenAI Function Calling 兼容的工具定义。"""
-        return [
-            {
-                "type": "function",
-                "function": {
-                    "name": "get_weather",
-                    "description": "获取指定城市某一天的天气情况（今天/明天/指定日期）。当用户询问天气、温度、是否能下雨、能否打药时调用。",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "city": {
-                                "type": "string",
-                                "description": "城市名称，如：阿拉尔、阿克苏",
-                            },
-                            "date": {
-                                "type": "string",
-                                "description": "要查询的日期，可以是 'today'（今天）、'tomorrow'（明天），或 YYYY-MM-DD 格式的具体日期（如 2025-06-15）。默认为 'today'。最多支持未来 3 天预报。",
-                            },
-                        },
-                        "required": ["city"],
-                    },
-                },
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "web_search",
-                    "description": "在互联网上搜索最新信息。当知识库中没有相关信息, 或用户询问最新政策、新闻、市场行情（如期货价格/期货行情）等实时信息时调用。",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "query": {
-                                "type": "string",
-                                "description": "搜索关键词",
-                            },
-                        },
-                        "required": ["query"],
-                    },
-                },
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "query_cotton_stats",
-                    "description": "查询/计算新疆棉花产量与播种面积统计数据。分地区数据覆盖 2015-2022 年，全区主要年份数据覆盖 1978-2022 年。支持：单点查询某地区某年产量/面积、亩产计算（公斤/亩）、多年合计/平均、某年产区排名、全区主要年份查询。当用户询问棉花产量、面积、亩产、产区排名等数据问题时调用。",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "region": {
-                                "type": "string",
-                                "description": "地区名，如：阿克苏地区、塔城地区-沙湾市、生产建设兵团；全区汇总或主要年份查询用 '全区'。",
-                            },
-                            "year": {
-                                "type": "integer",
-                                "description": "年份，如 2020。分地区可查 2015-2022，主要年份可查 1978-2022。",
-                            },
-                            "metric": {
-                                "type": "string",
-                                "enum": ["yield", "area", "mu", "long_yield", "long_area", "long_mu"],
-                                "description": "指标：yield=棉花产量、area=棉花播种面积、mu=棉花亩产（公斤/亩）、long_yield=长绒棉产量、long_area=长绒棉播种面积、long_mu=长绒棉亩产（公斤/亩）。",
-                            },
-                            "stat": {
-                                "type": "string",
-                                "enum": ["value", "total", "avg", "rank", "major"],
-                                "description": "统计类型：value=单点查询（需 region+year）、total=多年合计、avg=多年平均、rank=某年产区排名（需 year）、major=全区主要年份（需 year）。",
-                            },
-                            "top": {
-                                "type": "integer",
-                                "description": "rank 时返回前 N 名，默认 5。",
-                            },
-                        },
-                        "required": ["metric", "stat"],
-                    },
-                },
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "calc_price_volatility",
-                    "description": "查询/计算中国棉花现货价格指数（CC Index）数据。支持：单日/单月价格查询、波动率（日/年化）、区间涨跌幅、历史价格分位。六个等级：1129B/2129B/3128B/4128B/1228B/2227B，价格单位元/吨。数据范围 2016-01 ~ 2026-07。当用户询问棉花现货价格、价格波动、涨跌幅、价格历史位置等问题时调用。注意：本数据为现货价格指数，不含期货行情；用户询问期货价格/期货行情时请改用 web_search。",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "grade": {
-                                "type": "string",
-                                "enum": ["1129B", "2129B", "3128B", "4128B", "1228B", "2227B"],
-                                "description": "价格等级，默认 3128B（CC Index 328 标准等级）。",
-                            },
-                            "metric": {
-                                "type": "string",
-                                "enum": ["price", "volatility", "pct_change", "percentile"],
-                                "description": "操作：price=查询价格（需 date）、volatility=波动率（需 start/end，可加 period）、pct_change=区间涨跌幅（需 start/end）、percentile=历史价格分位（需 date）。",
-                            },
-                            "date": {
-                                "type": "string",
-                                "description": "价格/分位查询的日期，支持 YYYY-MM-DD（当日）或 YYYY-MM（当月最后一个交易日）。",
-                            },
-                            "start": {
-                                "type": "string",
-                                "description": "区间起始日期，YYYY-MM-DD 或 YYYY-MM。",
-                            },
-                            "end": {
-                                "type": "string",
-                                "description": "区间结束日期，YYYY-MM-DD 或 YYYY-MM（结束月份取当月最后交易日）。",
-                            },
-                            "period": {
-                                "type": "string",
-                                "enum": ["monthly", "annual"],
-                                "description": "波动率类型：monthly=日波动率（日收益标准差）、annual=年化波动率（×√交易日数），默认 monthly。",
-                            },
-                        },
-                        "required": ["metric"],
-                    },
-                },
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "plot_trend",
-                    "description": "绘制新疆棉花产量/面积/亩产/价格趋势折线图，支持多地区多系列对比。数据范围：分地区 2015-2022、全区主要年份 1978-2022、价格 2016-2026。当用户要求画图、图表、趋势、走势、对比图时调用。",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "metric": {
-                                "type": "string",
-                                "enum": ["yield", "area", "mu", "long_yield", "long_area", "price"],
-                                "description": "指标：yield=棉花产量、area=播种面积、mu=亩产（公斤/亩）、long_yield=长绒棉产量、long_area=长绒棉面积、price=价格指数（需 grade，按月取月末价）。",
-                            },
-                            "regions": {
-                                "type": "array",
-                                "items": {"type": "string"},
-                                "description": "地区列表（产量/面积/亩产指标时用），如 [\"阿克苏地区\", \"喀什地区\"]；省略或空 = 全区。",
-                            },
-                            "start": {
-                                "type": "string",
-                                "description": "起始年份（如 2018）或起始月份（price 指标时，如 2021-01）。",
-                            },
-                            "end": {
-                                "type": "string",
-                                "description": "结束年份（如 2022）或结束月份（price 指标时，如 2026-07）。",
-                            },
-                            "grade": {
-                                "type": "string",
-                                "enum": ["1129B", "2129B", "3128B", "4128B", "1228B", "2227B"],
-                                "description": "仅 price 指标使用，默认 3128B。",
-                            },
-                            "title": {
-                                "type": "string",
-                                "description": "可选，自定义图表标题。",
-                            },
-                        },
-                        "required": ["metric"],
-                    },
-                },
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "analyze_yield",
-                    "description": "产量预测区间与产区波动风险分级。forecast：基于 2015-2022 历史数据线性趋势外推，预测任意未来年份产量/面积，返回点预测+置信区间+趋势+R2；risk：按变异系数（CV）对产区波动风险分级（低<0.15/中0.15-0.35/高≥0.35）。当用户问预测产量、未来产量、风险评估、波动风险时调用。",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "metric": {
-                                "type": "string",
-                                "enum": ["yield", "area", "long_yield", "long_area"],
-                                "description": "指标：yield=棉花产量、area=播种面积、long_yield=长绒棉产量、long_area=长绒棉面积。",
-                            },
-                            "stat": {
-                                "type": "string",
-                                "enum": ["forecast", "risk"],
-                                "description": "操作：forecast=产量预测（需 region+target_year）、risk=风险分级（可加 regions 筛选）。",
-                            },
-                            "region": {
-                                "type": "string",
-                                "description": "forecast 时必填：要预测的地区名（必须与用户原话一致，如：阿克苏地区、喀什地区、生产建设兵团）。",
-                            },
-                            "target_year": {
-                                "type": "integer",
-                                "description": "forecast 时必填：预测目标年份（必须晚于 2022）。",
-                            },
-                            "confidence": {
-                                "type": "number",
-                                "description": "置信度，默认 0.90（可选 0.68/0.90/0.95，其他值线性插值）。",
-                            },
-                            "regions": {
-                                "type": "array",
-                                "items": {"type": "string"},
-                                "description": "risk 时可选：仅分析指定地区；省略则分析全部产区。",
-                            },
-                        },
-                        "required": ["metric", "stat"],
-                    },
-                },
-            },
-        ]
+        """返回工具定义（OpenAI / DeepSeek Function Calling 兼容）。
+
+        **实现已迁至 `core.tools.schemas`**，此处保留为向后兼容的委托入口，
+        使 `tests/eval_tools.py` 等既有调用方无需改动。
+        """
+        return TOOL_SCHEMAS
 
     # ------------------- 工具执行 ---------------------------------
 
     @staticmethod
     def _execute_tool(name: str, args: dict) -> str:
-        """执行本地工具并返回文本结果。
+        """执行工具并返回文本结果。
 
-        Args:
-            name: 工具名称 (get_weather / web_search)。
-            args: 工具参数。
-
-        Returns:
-            工具执行结果字符串; 失败时返回错误描述。
+        **实现已迁至 `core.tools`**，此处保留为向后兼容的委托入口。
+        桌面端（本类）与 MCP 服务端共用 `core.tools` 的同一份实现与契约，
+        因此不存在"两套工具逻辑各自演化"的风险（ROADMAP 方向 D1）。
         """
-        if name == "get_weather":
-            city = args.get("city", "")
-            if not city:
-                return "天气查询失败: 未提供城市名。"
-            date_str = args.get("date", "today")
-            api_key = AppConfig.AMAP_API_KEY
-            if not api_key:
-                return "天气查询失败: 未配置高德地图 API Key。"
+        return execute_tool(name, args)
 
-            # ── 计算目标日期相对于今天的偏移量 ──
-            today = date.today()
-            if date_str == "today":
-                offset = 0
-            elif date_str == "tomorrow":
-                offset = 1
-            else:
-                try:
-                    target = date.fromisoformat(date_str)
-                    offset = (target - today).days
-                except ValueError:
-                    return f"天气查询失败: 日期格式错误 [{date_str}]，请使用 YYYY-MM-DD 格式。"
-
-            if offset < 0:
-                return f"天气查询失败: 无法查询过去的日期 [{date_str}]。"
-
-            try:
-                if offset == 0:
-                    # 今天 → 实况天气 (extensions=base)
-                    resp = requests.get(
-                        "https://restapi.amap.com/v3/weather/weatherInfo",
-                        params={"key": api_key, "city": city, "extensions": "base"},
-                        timeout=10,
-                    )
-                    resp.raise_for_status()
-                    data = resp.json()
-                    if data.get("status") != "1":
-                        return f"天气查询失败: {data.get('info', '未知错误')}"
-                    lives = data.get("lives", [])
-                    if not lives:
-                        return f"天气查询失败: 未找到城市 [{city}] 的天气数据。"
-                    w = lives[0]
-                    return (
-                        f"城市: {w.get('city', city)}\n"
-                        f"天气: {w.get('weather', '未知')}\n"
-                        f"温度: {w.get('temperature', '未知')}°C\n"
-                        f"风向: {w.get('winddirection', '未知')} "
-                        f"风力: {w.get('windpower', '未知')}级\n"
-                        f"湿度: {w.get('humidity', '未知')}%\n"
-                        f"发布时间: {w.get('reporttime', '未知')}"
-                    )
-                else:
-                    # 明天及以后 → 预报 (extensions=all), 最多 4 天
-                    if offset > 3:
-                        return (
-                            f"天气查询失败: 仅支持查询今天起 4 天内的天气，"
-                            f"{date_str} 超出预报范围（今天: {today}，最远可查: {today} 往后 3 天）。"
-                        )
-                    resp = requests.get(
-                        "https://restapi.amap.com/v3/weather/weatherInfo",
-                        params={"key": api_key, "city": city, "extensions": "all"},
-                        timeout=10,
-                    )
-                    resp.raise_for_status()
-                    data = resp.json()
-                    if data.get("status") != "1":
-                        return f"天气查询失败: {data.get('info', '未知错误')}"
-                    forecasts = data.get("forecasts", [])
-                    if not forecasts:
-                        return f"天气查询失败: 未找到城市 [{city}] 的预报数据。"
-                    casts = forecasts[0].get("casts", [])
-                    if offset >= len(casts):
-                        return f"天气查询失败: 高德 API 未返回 {date_str} 的预报数据。"
-                    t = casts[offset]
-                    return (
-                        f"城市: {forecasts[0].get('city', city)}\n"
-                        f"日期: {t.get('date', date_str)}\n"
-                        f"白天天气: {t.get('dayweather', '未知')}\n"
-                        f"夜间天气: {t.get('nightweather', '未知')}\n"
-                        f"白天温度: {t.get('daytemp', '未知')}°C\n"
-                        f"夜间温度: {t.get('nighttemp', '未知')}°C\n"
-                        f"白天风力: {t.get('daypower', '未知')}级\n"
-                        f"夜间风力: {t.get('nightpower', '未知')}级"
-                    )
-            except requests.RequestException as e:
-                return f"天气查询失败: 网络错误 - {e}"
-            except (KeyError, IndexError, ValueError) as e:
-                return f"天气查询失败: 数据解析错误 - {e}"
-            except Exception as e:
-                return f"天气查询失败: {e}"
-
-        if name == "query_cotton_stats":
-            return RAGEngine._execute_cotton_stats(args)
-
-        if name == "calc_price_volatility":
-            return RAGEngine._execute_price_volatility(args)
-
-        if name == "plot_trend":
-            return RAGEngine._execute_plot_trend(args)
-
-        if name == "analyze_yield":
-            return RAGEngine._execute_analyze_yield(args)
-
-        if name == "web_search":
-            query = args.get("query", "")
-            if not query:
-                return "Tavily 搜索失败"
-            api_key = AppConfig.TAVILY_API_KEY
-            if not api_key:
-                return "错误：未配置 Tavily API Key"
-            try:
-                from tavily import TavilyClient
-                client = TavilyClient(api_key=api_key)
-                response = client.search(
-                    query=query, max_results=3, search_depth="advanced",
-                )
-                results = response.get("results", [])
-                if not results:
-                    return "Tavily 搜索未返回有效结果。"
-                lines: list[str] = []
-                for r in results:
-                    title = r.get("title", "")
-                    content = r.get("content", "")
-                    if not title and not content:
-                        continue
-                    if title:
-                        lines.append(f"标题: {title}")
-                    if content:
-                        lines.append(f"摘要: {content}")
-                    lines.append("---")
-                if not lines:
-                    return "Tavily 搜索未返回有效结果。"
-                return "\n".join(lines)
-            except Exception as e:
-                print(f"[Tool Call] Tavily 错误: {e}")
-                log.warning("Tavily 错误: %s", e)
-                return f"Tavily 搜索失败，错误信息: {str(e)}。请告知用户搜索功能暂时不可用。"
-
-        return f"工具未找到: {name}"
-
-    @staticmethod
-    def _execute_cotton_stats(args: dict) -> str:
-        """执行棉花统计数据查询，返回 JSON 字符串供 LLM 组织语言。"""
-        import json as _json
-
-        metric = args.get("metric", "")
-        stat = args.get("stat", "value")
-        region = args.get("region", "")
-        top = args.get("top", 5)
-
-        # 非法 metric 安全校验（各查询函数已有校验，此处提前返回更友好的提示）
-        valid_metrics = {"yield", "area", "mu", "long_yield", "long_area", "long_mu"}
-        if metric not in valid_metrics:
-            return _json.dumps(
-                {"error": f"不支持的指标: {metric!r}，可选 {sorted(valid_metrics)}"},
-                ensure_ascii=False,
-            )
-
-        year = args.get("year")
-        if year is not None:
-            try:
-                year = int(year)
-            except (TypeError, ValueError):
-                return _json.dumps({"error": f"年份参数无效: {year}"}, ensure_ascii=False)
-
-        if stat in ("total", "avg"):
-            result = aggregate(region, metric, stat)
-        elif stat == "rank":
-            result = rank_by_year(year, metric, top)
-        elif stat == "major":
-            result = query_major(metric, year)
-        else:  # value
-            result = query_value(region, year, metric)
-
-        return _json.dumps(result, ensure_ascii=False)
-
-    @staticmethod
-    def _execute_price_volatility(args: dict) -> str:
-        """执行棉花价格指数查询/计算，返回 JSON 字符串。"""
-        import json as _json
-
-        metric = args.get("metric", "")
-        grade = args.get("grade", "3128B")
-        date = args.get("date")
-        start = args.get("start")
-        end = args.get("end")
-        period = args.get("period", "monthly")
-
-        if metric == "price":
-            if not date:
-                return _json.dumps({"error": "price 查询需要 date 参数（YYYY-MM-DD 或 YYYY-MM）"},
-                                   ensure_ascii=False)
-            result = query_price(grade, date)
-        elif metric == "volatility":
-            result = calc_volatility(grade, start, end, period)
-        elif metric == "pct_change":
-            result = calc_pct_change(grade, start, end)
-        elif metric == "percentile":
-            if not date:
-                return _json.dumps({"error": "percentile 查询需要 date 参数"},
-                                   ensure_ascii=False)
-            result = calc_percentile(grade, date)
-        else:
-            result = {"error": f"不支持的 metric: {metric}，可选 price/volatility/pct_change/percentile"}
-
-        return _json.dumps(result, ensure_ascii=False)
-
-    @staticmethod
-    def _execute_plot_trend(args: dict) -> str:
-        """绘制趋势折线图：组装数据序列 → 生成 PNG → 返回路径与序列。
-
-        返回 JSON: {"chart_path", "title", "series": [...], "note", "error"?}
-        """
-        import json as _json
-
-        metric = args.get("metric", "")
-        regions = args.get("regions") or []
-        start = args.get("start")
-        end = args.get("end")
-        grade = args.get("grade", "3128B")
-        title = (args.get("title") or "").strip()
-
-        PRICE_METRICS = {"price"}
-        YEARLY_METRICS = {"yield", "area", "mu", "long_yield", "long_area"}
-
-        if metric not in PRICE_METRICS and metric not in YEARLY_METRICS:
-            return _json.dumps(
-                {"error": f"不支持的指标: {metric!r}，可选 "
-                          "yield/area/mu/long_yield/long_area/price"},
-                ensure_ascii=False,
-            )
-
-        try:
-            if metric in PRICE_METRICS:
-                # ── 价格月度序列（每等级一条线，regions 忽略） ──
-                result = monthly_series(grade, start, end)
-                if "error" in result:
-                    return _json.dumps(result, ensure_ascii=False)
-                series = [{
-                    "label": f"{grade}（元/吨）",
-                    "x": [p["month"] for p in result["points"]],
-                    "y": [p["value"] for p in result["points"]],
-                }]
-                notes = []
-                default_title = f"中国棉花价格指数 {grade} 月度走势"
-                xlabel, ylabel = "月份", "价格（元/吨）"
-            else:
-                # ── 年度序列（每地区一条线） ──
-                if not regions:
-                    regions = ["全区"]
-                series = []
-                notes = []
-                unit = ""
-                for r in regions:
-                    res = series_by_year(r, metric, int(start or 2015),
-                                         int(end or 2022))
-                    if "error" in res:
-                        return _json.dumps({"error": f"地区「{r}」: {res['error']}",
-                                            "candidates": res.get("candidates")},
-                                           ensure_ascii=False)
-                    if res.get("note"):
-                        notes.append(res["note"])
-                    unit = res.get("unit", unit)
-                    series.append({
-                        "label": res["region"],
-                        "x": [str(p["year"]) for p in res["points"]],
-                        "y": [p["value"] for p in res["points"]],
-                    })
-                metric_label = {
-                    "yield": "棉花产量", "area": "棉花播种面积", "mu": "棉花亩产",
-                    "long_yield": "长绒棉产量", "long_area": "长绒棉播种面积",
-                }[metric]
-                default_title = f"新疆{metric_label}趋势对比（{'、'.join(r for r in regions)}）"
-                xlabel, ylabel = "年份", f"{metric_label}（{unit}）"
-        except (TypeError, ValueError) as e:
-            return _json.dumps({"error": f"参数解析失败: {e}"}, ensure_ascii=False)
-
-        # ── 生成图片 ──
-        try:
-            out_path = next_chart_path("trend")
-            generate_trend_chart(series, title or default_title,
-                                 xlabel, ylabel, out_path)
-        except Exception as e:
-            return _json.dumps({"error": f"图表生成失败: {e}"}, ensure_ascii=False)
-
-        resp: dict = {
-            "chart_path": out_path.as_posix(),
-            "title": title or default_title,
-            "series": series,
-        }
-        if notes:
-            resp["note"] = "；".join(notes)
-        return _json.dumps(resp, ensure_ascii=False)
-
-    @staticmethod
-    def _execute_analyze_yield(args: dict) -> str:
-        """执行产量预测/风险分级，返回 JSON 字符串。
-
-        forecast 自动生成预测区间带图，risk 自动生成风险条形图，
-        chart_path 随结果返回（复用现有 ![图表] 兜底嵌入机制）。
-        """
-        import json as _json
-
-        metric = args.get("metric", "")
-        stat = args.get("stat", "")
-
-        METRIC_LABELS = {
-            "yield": "棉花产量", "area": "棉花播种面积",
-            "long_yield": "长绒棉产量", "long_area": "长绒棉播种面积",
-        }
-
-        try:
-            if stat == "forecast":
-                region = args.get("region", "")
-                if not region:
-                    return _json.dumps(
-                        {"error": "forecast 需要 region 参数（必须使用用户原话中的地区名）"},
-                        ensure_ascii=False,
-                    )
-                target_year = args.get("target_year")
-                if target_year is None:
-                    return _json.dumps(
-                        {"error": "forecast 需要 target_year 参数（预测目标年份）"},
-                        ensure_ascii=False,
-                    )
-                confidence = args.get("confidence", 0.90)
-                result = forecast_yield(region, metric, target_year, confidence)
-                if "error" not in result:
-                    from core.trend_plot import generate_forecast_chart, next_chart_path
-                    out = next_chart_path("forecast")
-                    generate_forecast_chart(
-                        result["region"], METRIC_LABELS.get(metric, metric),
-                        result.get("unit", ""), result["history"],
-                        result["target_year"], result["forecast"],
-                        result["ci_lower"], result["ci_upper"], out,
-                    )
-                    result["chart_path"] = out.as_posix()
-            elif stat == "risk":
-                regions = args.get("regions")
-                result = risk_ranking(metric, regions)
-                if "error" not in result:
-                    from core.trend_plot import generate_risk_chart, next_chart_path
-                    out = next_chart_path("risk")
-                    generate_risk_chart(
-                        result["ranking"], METRIC_LABELS.get(metric, metric),
-                        result.get("unit", ""), out,
-                    )
-                    result["chart_path"] = out.as_posix()
-            else:
-                result = {"error": f"不支持的 stat: {stat}，可选 forecast/risk"}
-        except Exception as e:
-            result = {"error": f"分析失败: {e}"}
-
-        return _json.dumps(result, ensure_ascii=False)
 
     # ------------------- 组装 L1 消息 ----------------------------
 
@@ -1161,7 +813,7 @@ class RAGEngine:
             context = ""
 
         try:
-            l4_facts = self.kb.retrieve_l4_memory(search_query, k=3)
+            l4_facts = self.memory.retrieve_l4_memory(search_query, k=3)
         except Exception as e:
             print(f"[L1 组装] L4 记忆检索失败（降级为空）: {e}")
             l4_facts = []
@@ -1179,7 +831,7 @@ class RAGEngine:
             # L3 向量化后：语义召回相关历史摘要段（翻旧账）+ 当前完整摘要（最新状态）
             recalled: list[str] = []
             try:
-                recalled = self.kb.retrieve_session_summaries(search_query, k=3)
+                recalled = self.memory.retrieve_session_summaries(search_query, k=3)
             except Exception:
                 recalled = []
             parts = []

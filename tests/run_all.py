@@ -11,9 +11,10 @@
   2. eval_numeric.py     —— 数值一致性（工具返回值 vs 期望值，目标 100%）
   3. eval_tools.py       —— 工具选择准确率（LLM 工具决策，支持多次运行评估稳定性）
   4. eval_retrieval.py   —— 检索质量 Hit@K / MRR（含 top-20 探针与未命中归因）
+                            以 --rerank 运行，即与生产配置一致（向量召回 top-20 → 精排取 top-3）
   5. eval_generation.py  —— 生成质量（忠实度 / 拒答率 / 要点覆盖，LLM-as-judge）
 
-【报告生成机制：自动区块 + 人工区块分离】
+【报告生成：自动区块 + 人工区块分离】
   eval_report.md 被划分为两部分：
 
   - **自动区块**：位于 `<!-- AUTO-BEGIN -->` 与 `<!-- AUTO-END -->` 之间，
@@ -26,8 +27,8 @@
   若目标文件不存在，或存在但缺少标记，会先备份（eval_report.md.bak）再生成新骨架。
 
 【用法】
-  .venv\\Scripts\\python.exe tests\\run_all.py            # 完整评测（工具集约 6-9 分钟）
-  .venv\\Scripts\\python.exe tests\\run_all.py --quick    # 快速模式（工具集只跑 1 次，约 3 分钟）
+  .venv\\Scripts\\python.exe tests\\run_all.py            # 完整评测
+  .venv\\Scripts\\python.exe tests\\run_all.py --quick    # 快速模式
 
 【产物】
   - eval_report.md              评测报告（自动区块重建，人工区块保留）
@@ -68,6 +69,15 @@ EVALS = [
         "metric": "校验结果",
     },
     {
+        # 纯 CSV 读取 + 静态扫描，**零 LLM 调用**，故放在最前面当"前置体检"
+        "key": "data_ranges",
+        "name": "数据范围一致性",
+        "script": "tests/check_data_ranges.py",
+        "args": [],
+        "pattern": r"结果: (\d+/\d+ 通过)",
+        "metric": "范围一致性",
+    },
+    {
         "key": "numeric",
         "name": "数值一致性",
         "script": "tests/eval_numeric.py",
@@ -86,17 +96,18 @@ EVALS = [
     },
     {
         "key": "retrieval",
-        "name": "检索质量（Hit@3 / MRR）",
+        "name": "检索质量（Rerank 精排 · Hit@3 / MRR）",
         "script": "tests/eval_retrieval.py",
-        "args": [],
+        # --rerank：与生产配置一致（向量召回 top-20 → bge-reranker-v2-m3 精排 → 取 top-3）
+        "args": ["--rerank"],
         "pattern": r"Hit@3\s*: \d+/\d+ = ([\d.]+%)",
         "metric": "Hit@3",
     },
     {
         "key": "retrieval_recall",
-        "name": "检索召回上限（Hit@20 探针）",
+        "name": "检索召回上限（Rerank 精排 · Hit@20 探针）",
         "script": "tests/eval_retrieval.py",
-        "args": [],
+        "args": ["--rerank"],   # 与上一条同脚本同参数 → 复用同一份输出，不重复运行
         "pattern": r"Hit@20\s*: \d+/\d+ = ([\d.]+%)",
         "metric": "Hit@20",
         "only_pattern": True,   # 复用同一脚本输出，不重复运行
@@ -108,6 +119,33 @@ EVALS = [
         "args": [],
         "pattern": r"忠实度\s*: \d+/\d+ = ([\d.]+%)",
         "metric": "忠实度",
+    },
+    # ── E4 记忆评测集（一个脚本跑一次，提取三项指标）──
+    {
+        "key": "memory",
+        "name": "记忆质量（冲突消解 / 去重 / 检索）",
+        "script": "tests/eval_memory.py",
+        "args": [],
+        "pattern": r"冲突消解准确率: \d+/\d+ = ([\d.]+%)",
+        "metric": "冲突消解准确率（目标 ≥ 90%）",
+    },
+    {
+        "key": "memory_dedup",
+        "name": "记忆去重率",
+        "script": "tests/eval_memory.py",
+        "args": [],
+        "pattern": r"去重率: \d+/\d+ = ([\d.]+%)",
+        "metric": "去重率",
+        "only_pattern": True,
+    },
+    {
+        "key": "memory_retrieval",
+        "name": "记忆检索 Hit@3",
+        "script": "tests/eval_memory.py",
+        "args": [],
+        "pattern": r"记忆检索 Hit@3: \d+/\d+ = ([\d.]+%)",
+        "metric": "Hit@3（目标 ≥ 80%）",
+        "only_pattern": True,
     },
 ]
 
@@ -149,35 +187,54 @@ cd Your_path
 
 # 单项运行
 .venv\\Scripts\\python.exe tests\\verify_datasets.py          # 评测集校验
+.venv\\Scripts\\python.exe tests\\check_data_ranges.py        # 数据范围一致性（零 LLM）
 .venv\\Scripts\\python.exe tests\\eval_numeric.py             # 数值一致性
 .venv\\Scripts\\python.exe tests\\eval_tools.py --repeat 3    # 工具选择
-.venv\\Scripts\\python.exe tests\\eval_retrieval.py           # 检索质量
+.venv\\Scripts\\python.exe tests\\eval_retrieval.py --rerank  # 检索质量（生产配置：Rerank 精排）
 .venv\\Scripts\\python.exe tests\\eval_generation.py          # 生成质量
+
+# 非评测类守卫（不进本报告的 AUTO 区块，各自独立运行）
+.venv\\Scripts\\python.exe tests\\smoke_memory.py             # 记忆链路冒烟（零 LLM）
+.venv\\Scripts\\python.exe tests\\smoke_mcp.py                # MCP 服务端冒烟
+.venv\\Scripts\\python.exe tests\\check_imports.py            # 未使用导入检查
+.venv\\Scripts\\python.exe tests\\check_l4_conflict.py        # L4 冲突判定回归
 ```
 """
 
 
 def run_one(cfg: dict, quick: bool, cache: dict) -> dict:
-    """运行单个评测脚本（同脚本复用缓存结果），返回 {ok, output, metric}。"""
+    """运行单个评测脚本（同脚本复用缓存结果）。
+
+    返回 `{ok, failed, output, metric}`：
+      · `ok=False`      —— 脚本**不存在**（未实现）
+      · `failed=True`   —— 脚本跑了但**退出码非 0**（本次检查未通过）
+
+    为什么必须区分这两者：状态列原先只看"正则能不能解析出指标"，
+    于是**一个确凿失败的检查（如 `5/9 通过`）照样显示 ✅** —— 守卫会形同虚设。
+    现在退出码也纳入判定。
+    """
     script = cfg["script"]
     if not os.path.exists(script):
-        return {"ok": False, "output": "", "metric": "未实现（待补）"}
+        return {"ok": False, "failed": False, "output": "", "metric": "未实现（待补）"}
 
     # 同一脚本只跑一次（如 retrieval 与 retrieval_recall 共用输出）
     if script in cache:
-        out = cache[script]
+        out, failed = cache[script]
     else:
         args = [PY, script] + cfg["args"]
         if not quick and cfg.get("repeat_args"):
             args += cfg["repeat_args"]
         print("  → 运行 %s ..." % script, flush=True)
+        failed = False
         try:
             proc = subprocess.run(args, capture_output=True, text=True,
                                   encoding="utf-8", errors="replace", timeout=1800, cwd=ROOT)
             out = (proc.stdout or "") + (proc.stderr or "")
+            failed = proc.returncode != 0
         except subprocess.TimeoutExpired:
             out = "[超时] 脚本运行超过 30 分钟"
-        cache[script] = out
+            failed = True
+        cache[script] = (out, failed)
         # 留档完整输出
         with open(os.path.join(OUTDIR, os.path.splitext(os.path.basename(script))[0] + ".txt"),
                   "w", encoding="utf-8") as f:
@@ -185,7 +242,7 @@ def run_one(cfg: dict, quick: bool, cache: dict) -> dict:
 
     m = re.search(cfg["pattern"], out)
     metric = m.group(1) if m else "解析失败"
-    return {"ok": True, "output": out, "metric": metric}
+    return {"ok": True, "failed": failed, "output": out, "metric": metric}
 
 
 def summarize(cfg: dict, res: dict, quick: bool) -> str:
@@ -194,6 +251,8 @@ def summarize(cfg: dict, res: dict, quick: bool) -> str:
     if not res["ok"]:
         lines.append("- 状态：**未实现**（评测集已就绪，脚本待补）")
         return "\n".join(lines)
+    if res.get("failed"):
+        lines.append("- 状态：**本次运行未通过**（脚本退出码非 0，详见 `tests/eval_outputs/`）")
     if cfg.get("only_pattern"):
         lines.append("- 说明：与「检索质量」同一次运行，作为**召回上限**指标（诊断瓶颈在排序还是召回）")
         return "\n".join(lines)
@@ -227,6 +286,7 @@ def build_auto_block(results: dict, quick: bool, now: str) -> str:
     lines = []
     lines.append("> **数据时间**：%s ｜ **运行模式**：%s"
                  % (now, "快速（工具集单次）" if quick else "完整（工具集 3 次）"))
+    lines.append("> **检索口径**：`--rerank` 精排（向量召回 top-20 → 精排取 top-3），与生产配置一致")
     lines.append("> **说明**：本区块由 `tests/run_all.py` 自动重建（重跑即刷新）；"
                  "标记之外的章节为人工维护，不受影响。")
     lines.append("> **原始输出留档**：`tests/eval_outputs/`")
@@ -238,7 +298,8 @@ def build_auto_block(results: dict, quick: bool, now: str) -> str:
     lines.append("|---|---|---|---|")
     for cfg in EVALS:
         res = results[cfg["key"]]
-        ok = res["ok"] and res["metric"] not in ("解析失败",)
+        ok = (res["ok"] and not res.get("failed")
+              and res["metric"] not in ("解析失败",))
         status = "✅" if ok else "⚠️ 需关注"
         lines.append("| %s | %s | %s | %s |" % (cfg["name"], cfg["metric"], res["metric"], status))
     lines.append("")
@@ -274,6 +335,9 @@ def apply_to_report(auto_block: str) -> str:
     if m_begin and m_end and m_end.start() > m_begin.end():
         head = text[:m_begin.start()]
         tail = text[m_end.end():]
+        # m_end 的 `\s*$` 会把 AUTO-END 之后的空行一并吃掉 → 这里补回一个空行，
+        # 保证自动区块与后续人工章节之间始终有空行（避免逐次重跑吃掉格式）
+        tail = ("\n\n" + tail.lstrip("\n")) if tail.strip() else "\n"
         with open(REPORT, "w", encoding="utf-8") as f:
             f.write(head + AUTO_BEGIN + "\n\n" + auto_block + "\n" + AUTO_END + tail)
         return "已重建自动区块（人工章节保持不变）"

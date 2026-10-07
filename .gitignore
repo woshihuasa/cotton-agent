@@ -14,11 +14,12 @@ venv/
 .env.local
 
 # ── 运行数据 ──
-session_state.json
+session_state.json*
 kb_fingerprint.json
 embedding_check.json
 *.log
 charts/
+data-gym-cache/
 
 # ── 本地向量库 ──
 chroma_db/
@@ -40,3 +41,7 @@ build_version.txt
 # ── other ──
 docs/
 tests/eval_outputs/
+data/charts
+
+# ── 测试固定数据 ──
+tests/eval_fixtures/

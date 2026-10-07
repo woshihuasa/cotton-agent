@@ -1,22 +1,34 @@
 """
-趋势折线图生成模块（plot_trend 工具后端）
+趋势折线图生成模块（plot_trend / analyze_yield 工具后端）
 
 职责：
   - 配置 matplotlib 中文字体（Windows SimHei），防止标题 / 轴标签乱码
-  - 将多系列数据渲染为折线图 PNG，保存至 data/charts/
+  - 将多系列数据渲染为折线图 PNG
+
+**两类消费路径**（见 ROADMAP 方向 D1）：
+  1. **桌面端**：`generate_*_chart(..., output_path)` 落盘并返回路径，
+     供 LLM 用 `![图表](path)` 嵌入回答。
+  2. **MCP / 内存**：`render_*_chart(...)` 只返回 PNG 字节、**完全不落盘** ——
+     因为 MCP 宿主可能是另一台机器，读不到本地路径；图片应作为
+     image content block 随结果返回。
+
+两者共用同一套建图逻辑（`build_*_figure`）与同一个渲染出口（`render_png`），
+因此"落盘"与"内存"两条路径**渲染结果完全一致**，不会各画各的。
 
 对外接口：
   generate_trend_chart(series, title, xlabel, ylabel, output_path) -> str
+  render_trend_chart(series, title, xlabel, ylabel) -> bytes
 """
 
 from __future__ import annotations
 
+import io
 from datetime import datetime
 from pathlib import Path
 
 import matplotlib
 
-matplotlib.use("Agg")  # 无 GUI 后端，纯文件输出
+matplotlib.use("Agg")  # 无 GUI 后端，纯文件/内存输出
 import matplotlib.pyplot as plt
 from matplotlib import rcParams
 
@@ -69,24 +81,34 @@ def next_chart_path(prefix: str = "trend") -> Path:
     return ensure_chart_dir() / f"{prefix}_{ts}.png"
 
 
-def generate_trend_chart(
-    series: list[dict],
-    title: str,
-    xlabel: str,
-    ylabel: str,
-    output_path: str | Path,
-) -> str:
-    """将多系列数据渲染为折线图 PNG。
+def render_png(fig, output_path: str | Path | None = None) -> bytes:
+    """把 figure 渲染为 PNG 字节，并在给定路径时**同时**落盘。
+
+    关键点：落盘与返回用的是**同一份字节**（先渲染到内存，再写文件），
+    而不是"存一次盘 + 另外渲染一份" —— 避免两条路径产出不一致的图，
+    也避免重复渲染的开销。
 
     Args:
-        series: 系列列表，每项为 {"label": 系列名, "x": [类别/日期], "y": [数值]}。
-        title: 图表标题。
-        xlabel: X 轴标签。
-        ylabel: Y 轴标签。
-        output_path: PNG 输出路径。
+        fig: matplotlib Figure。
+        output_path: 落盘路径；传 `None` 表示**只渲染不落盘**（MCP / 内存场景）。
 
     Returns:
-        str: 生成的图片路径（绝对或相对路径字符串）。
+        PNG 字节。
+    """
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=150)
+    data = buf.getvalue()
+    plt.close(fig)
+
+    if output_path is not None:
+        out = Path(output_path)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(data)
+    return data
+
+
+def build_trend_figure(series: list[dict], title: str, xlabel: str, ylabel: str):
+    """构建趋势折线图 Figure（不做渲染/落盘，由调用方决定出口）。
 
     Raises:
         ValueError: series 为空或无有效数据点。
@@ -117,14 +139,42 @@ def generate_trend_chart(
     ax.legend(fontsize=10)
 
     # X 轴标签防重叠（类别多时旋转）
-    fig.autofmt_xdate() if len(series[0].get("x") or []) > 8 else None
+    if len(series[0].get("x") or []) > 8:
+        fig.autofmt_xdate()
     fig.tight_layout()
+    return fig
 
-    out = Path(output_path)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out, dpi=150)
-    plt.close(fig)
-    return out.as_posix()  # 正斜杠路径，兼容 Markdown 图片链接
+
+def render_trend_chart(series: list[dict], title: str, xlabel: str, ylabel: str) -> bytes:
+    """渲染趋势折线图为 PNG 字节，**不落盘**（MCP / 内存路径）。"""
+    return render_png(build_trend_figure(series, title, xlabel, ylabel))
+
+
+def generate_trend_chart(
+    series: list[dict],
+    title: str,
+    xlabel: str,
+    ylabel: str,
+    output_path: str | Path,
+) -> str:
+    """将多系列数据渲染为折线图 PNG 并落盘（桌面路径）。
+
+    Args:
+        series: 系列列表，每项为 {"label": 系列名, "x": [类别/日期], "y": [数值]}。
+        title: 图表标题。
+        xlabel: X 轴标签。
+        ylabel: Y 轴标签。
+        output_path: PNG 输出路径。
+
+    Returns:
+        str: 生成的图片路径（正斜杠，兼容 Markdown 图片链接）。
+
+    Raises:
+        ValueError: series 为空或无有效数据点。
+    """
+    fig = build_trend_figure(series, title, xlabel, ylabel)
+    render_png(fig, output_path)
+    return Path(output_path).as_posix()  # 正斜杠路径，兼容 Markdown 图片链接
 
 
 def generate_forecast_chart(

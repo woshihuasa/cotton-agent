@@ -3,8 +3,11 @@
 
 数据源：data/新疆_数据统计/新疆棉花价格指数月度统计.csv
   - 中国棉花协会 CC Index 六等级（1129B/2129B/3128B/4128B/1228B/2227B）
-  - 2016-01-04 ~ 2022-12-30，1580 个交易日
   - 列：日期 + 6 等级 × (价格(元/吨) + 涨跌)
+  - ⚠️ **起止日期与行数不在此写死**：数据会随更新增长，写死的数字必然过期。
+    运行时用 `data_range_hint()` 现算。
+    （曾把"2016-01-04 ~ 2022-12-30，1580 个交易日"写进注释，而实际已到
+    2026-07-31 / 2483 行 —— 注释和提示一起过期，见下方 `data_range_hint` 说明。）
 """
 
 from pathlib import Path
@@ -28,8 +31,6 @@ GRADE_COLUMNS: dict[str, str] = {
     "2227B": "2227B价格（元/吨）",
 }
 
-DATA_RANGE_HINT = "数据范围: 2016-01-04 ~ 2022-12-30"
-
 _cache: pd.DataFrame | None = None
 
 
@@ -44,6 +45,24 @@ def _get_df() -> pd.DataFrame:
         df = df.sort_values(COL_DATE).reset_index(drop=True)
         _cache = df
     return _cache
+
+
+def data_range_hint() -> str:
+    """返回数据**真实**的起止日期（从数据现算，不写死）。
+
+    为什么必须现算（2026-10-07 修）：此处原为硬编码常量
+    `"数据范围: 2016-01-04 ~ 2022-12-30"`，但 CSV 实际已到 **2026-07-31**
+    （2483 行，而非注释里写的 1580 行）。该提示会随错误信息作为**工具结果回给
+    LLM**，于是模型会据此告诉用户"2022 年之后的价格查不到" —— 数据明明存在。
+    **这不是文案瑕疵，是主动误导模型**。
+
+    对照：`cotton_stats` 一直用的是这个做法（错误信息里 `可查年份: {list_years()}`），
+    本模块此前是唯一的例外。改成现算后，数据更新时提示自动跟随，不可能再过期。
+    """
+    df = _get_df()
+    if df.empty:
+        return "数据范围: 未知（数据为空）"
+    return f"数据范围: {df[COL_DATE].min():%Y-%m-%d} ~ {df[COL_DATE].max():%Y-%m-%d}"
 
 
 def _grade_col(grade: str) -> str:
@@ -112,7 +131,7 @@ def monthly_series(grade: str, start: str | None = None,
         return {"error": str(e)}
 
     if df.empty:
-        return {"error": f"区间内无价格数据（{DATA_RANGE_HINT}）"}
+        return {"error": f"区间内无价格数据（{data_range_hint()}）"}
 
     points: list[dict] = []
     for _, grp in df.groupby(df[COL_DATE].dt.to_period("M")):
@@ -151,7 +170,7 @@ def query_price(grade: str, date: str) -> dict:
     if len(date) == 7 and date[4] == "-":
         month_rows = df[df[COL_DATE].dt.strftime("%Y-%m") == target.strftime("%Y-%m")]
         if month_rows.empty:
-            return {"error": f"{date} 无价格数据（{DATA_RANGE_HINT}）"}
+            return {"error": f"{date} 无价格数据（{data_range_hint()}）"}
         last = month_rows.iloc[-1]
         val = last[col]
         if pd.isna(val):
@@ -171,7 +190,7 @@ def query_price(grade: str, date: str) -> dict:
         return {"grade": grade, "date": str(target.date()), "value": float(val),
                 "unit": "元/吨", "has_data": True}
 
-    return {"error": f"{date} 无价格数据（{DATA_RANGE_HINT}）"}
+    return {"error": f"{date} 无价格数据（{data_range_hint()}）"}
 
 
 def calc_volatility(grade: str, start: str | None = None, end: str | None = None,
@@ -193,7 +212,7 @@ def calc_volatility(grade: str, start: str | None = None, end: str | None = None
         return {"error": str(e)}
 
     if df.empty:
-        return {"error": f"区间内无价格数据（{DATA_RANGE_HINT}）"}
+        return {"error": f"区间内无价格数据（{data_range_hint()}）"}
 
     prices = df[col].dropna()
     if len(prices) < 2:
@@ -234,7 +253,7 @@ def calc_pct_change(grade: str, start: str | None = None, end: str | None = None
         return {"error": str(e)}
 
     if df.empty:
-        return {"error": f"区间内无价格数据（{DATA_RANGE_HINT}）"}
+        return {"error": f"区间内无价格数据（{data_range_hint()}）"}
 
     prices = df[col].dropna()
     if len(prices) < 2:
@@ -272,13 +291,13 @@ def calc_percentile(grade: str, date: str) -> dict:
     if len(date) == 7 and date[4] == "-":
         month_rows = df[df[COL_DATE].dt.strftime("%Y-%m") == target.strftime("%Y-%m")]
         if month_rows.empty:
-            return {"error": f"{date} 无价格数据（{DATA_RANGE_HINT}）"}
+            return {"error": f"{date} 无价格数据（{data_range_hint()}）"}
         day_rows = month_rows.iloc[[-1]]
         target = day_rows.iloc[0][COL_DATE]
     else:
         day_rows = df[df[COL_DATE] == target]
         if day_rows.empty:
-            return {"error": f"{date} 无价格数据（{DATA_RANGE_HINT}）"}
+            return {"error": f"{date} 无价格数据（{data_range_hint()}）"}
 
     val = day_rows.iloc[0][col]
     if pd.isna(val):

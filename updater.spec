@@ -1,8 +1,18 @@
 # -*- mode: python ; coding: utf-8 -*-
+"""更新器（updater）的 PyInstaller 配置。
+
+⚠️ 原先第 5 行是**写死的绝对路径** `E:\\cotton_agent\\updater_runner.py` ——
+   别人 clone 下来打包必然失败。改为与 `cotton_agent.spec` 一致的做法：
+   以 spec 文件自身位置推导仓库根目录。
+"""
+
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent if "__file__" in globals() else Path(SPECPATH)
 
 
 a = Analysis(
-    ['E:\\cotton_agent\\updater_runner.py'],
+    [str(ROOT / "updater_runner.py")],
     pathex=[],
     binaries=[],
     datas=[],

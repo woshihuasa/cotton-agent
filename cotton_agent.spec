@@ -11,14 +11,44 @@ from PyInstaller.utils.hooks import collect_dynamic_libs, collect_submodules
 
 ROOT = Path(__file__).resolve().parent if "__file__" in globals() else Path(SPECPATH)
 
+# 知识库允许分发的文件类型。`data/` 本应只放这些（文档 + 统计数据），
+# 但历史上曾有运行时产物落进去（如早期版本写图的 data/charts/*.png），
+# 被整目录照搬进了 v0.2.1 / v0.3.0 发布包（ROADMAP 短板 #20）。
+# 因此改为**白名单收集**：非白名单文件不进包，并打印出来提醒清理。
+KB_SUFFIXES = {".md", ".csv", ".pdf", ".txt"}
+
+
+def kb_datas():
+    """按白名单收集 data/ 下的知识库文档，返回 PyInstaller 的 (源, 目标目录) 列表。
+
+    显式逐文件枚举（而非整目录照搬），确保运行时产物永远进不了发布包。
+    """
+    data_root = ROOT / "data"
+    entries, skipped = [], []
+    for f in sorted(data_root.rglob("*")):
+        if not f.is_file():
+            continue
+        rel = f.relative_to(data_root)
+        if f.suffix.lower() in KB_SUFFIXES:
+            entries.append((str(f), str(Path("data") / rel.parent)))
+        else:
+            skipped.append(rel.as_posix())
+    if skipped:
+        print(f"[spec] 已排除 {len(skipped)} 个非知识库文件（不随包分发，建议从 data/ 清理）:")
+        for s in skipped[:20]:
+            print(f"[spec]    data/{s}")
+    print(f"[spec] 知识库文件 {len(entries)} 个将随包分发")
+    return entries
+
+
 # 主程序
 a = Analysis(
     [str(ROOT / "main.py")],
     pathex=[str(ROOT)],
     binaries=[],
     datas=[
-        # 只读资产（知识库文档 + Web 页面 + 图标 + 版本号），Windows 用分号分隔
-        (str(ROOT / "data"), "data"),
+        # 只读资产（知识库文档 + Web 页面 + 图标 + 版本号）
+        *kb_datas(),
         (str(ROOT / "web"), "web"),
         (str(ROOT / "ui" / "icons"), "ui/icons"),
         (str(ROOT / "build_version.txt"), "."),

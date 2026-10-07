@@ -14,6 +14,9 @@ FILES = {
     "tool_set.jsonl": ("prompt", "expected_tool"),
     "e2e_set.jsonl": ("question", "expected_tools"),
     "numeric_set.jsonl": ("region", "year", "metric", "expected_value"),
+    # 记忆集是异质的（seed / conflict / dedup / retrieval 四种行），
+    # 故此处只校验公共字段 type；各类型的专属字段由 eval_memory.py 的装载器把关。
+    "memory_set.jsonl": ("type",),
 }
 ok = True
 data = {}

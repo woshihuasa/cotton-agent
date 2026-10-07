@@ -134,8 +134,19 @@ class LLMClient:
 
         except APIError as e:
             print(f"[LLMClient] 流式 API 调用失败：{e}")
-            yield ("content", "抱歉，AI 服务暂时不可用，请检查网络或 API 配置。")
+            # ⚠️ 必须用 **"error"** 而不是 "content"（2026-10-08 修）：
+            # 原先这里 yield ("content", "抱歉，AI 服务暂时不可用…")，等于**把一句错误
+            # 提示伪装成模型的回答**。后果是调用方无法区分"模型答得差"与"根本没答"：
+            #   · 评测里 `answer` 非空 → 被送去 judge → covers=False，
+            #     看起来像质量问题，实际是 API 挂了；
+            #   · 该文案不含任何拒答特征词 → `is_refusal=False` → 被记为"拒答正确"，
+            #     **拒答率虚高**（实测：API 全挂时报出 2/2 = 100%）。
+            # 改为独立类型后，`ask()` 只把 "content" 计入回答，失败样本回答为空，
+            # 评测可据此判为链路异常并排除出分母。
+            # UI 侧无需改动：`main_window._on_update_text` 只特判 "reasoning"，
+            # 其余类型同样进正文气泡，显示效果与修复前一致。
+            yield ("error", "抱歉，AI 服务暂时不可用，请检查网络或 API 配置。")
 
         except Exception as e:
             print(f"[LLMClient] 流式未知错误：{e}")
-            yield ("content", "抱歉，AI 服务暂时不可用，请检查网络或 API 配置。")
+            yield ("error", "抱歉，AI 服务暂时不可用，请检查网络或 API 配置。")

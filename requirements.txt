@@ -35,5 +35,9 @@ requests>=2.31.0
 fastapi>=0.110.0
 uvicorn>=0.30.0
 
+# ── MCP 服务（mcp_server.py；仅把 6 个工具暴露给 MCP 宿主时需要，桌面端不必装）──
+# 实测版本 mcp 2.3.0（注意 2.x 有破坏性变更：FastMCP 已改名为 MCPServer）
+mcp>=2.0.0
+
 # ── 打包（可选：仅构建 exe 时需要）──
 # pyinstaller>=6.0

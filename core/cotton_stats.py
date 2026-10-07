@@ -439,7 +439,11 @@ def aggregate(region: str, metric: str, op: str) -> dict:
             label = "平均"
         else:
             return {"error": f"不支持的统计操作: {op}，可选 total/avg"}
-        return {"region": "全区", "metric": metric, "op": label, "value": round(v, 1),
+        # float(v)：pandas 的 sum()/mean() 返回 **numpy 标量**，其中 np.int64
+        # 不是 Python int 的子类，会让下游 json.dumps 抛
+        # "Object of type int64 is not JSON serializable"，导致整条工具链路失败。
+        # （np.float64 恰是 float 的子类，能静默通过 —— 所以只有整数聚合会炸。）
+        return {"region": "全区", "metric": metric, "op": label, "value": round(float(v), 1),
                 "unit": unit, "years": len(vals),
                 "note": "总计口径：含地方与生产建设兵团"}
     else:
@@ -460,7 +464,8 @@ def aggregate(region: str, metric: str, op: str) -> dict:
         label = "平均"
     else:
         return {"error": f"不支持的统计操作: {op}，可选 total/avg"}
-    return {"region": region, "metric": metric, "op": label, "value": round(v, 1),
+    # float(v)：同上——numpy 标量不可 JSON 序列化
+    return {"region": region, "metric": metric, "op": label, "value": round(float(v), 1),
             "unit": unit, "years": len(vals)}
 
 
@@ -481,7 +486,7 @@ def rank_by_year(year: int, metric: str, top: int = 5) -> dict:
         return {"error": f"{year} 年无有效排名数据"}
 
     ranking = [
-        {"region": r[COL_REGION], "value": round(r["_v"], 1)}
+        {"region": r[COL_REGION], "value": round(float(r["_v"]), 1)}
         for _, r in vals.head(top).iterrows()
     ]
     return {"year": year, "metric": metric, "unit": unit, "ranking": ranking}

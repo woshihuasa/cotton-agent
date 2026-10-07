@@ -58,11 +58,15 @@ MAX_SESSIONS = 50           # 上限保护，超出时淘汰最久未用
 
 _sessions: dict[str, dict] = {}
 _lock = threading.Lock()
-_shared_kb = None           # 向量库连接全局复用（只读检索）
+_shared_kb = None           # 知识库连接全局复用（只读检索）
 
 
 def _get_shared_kb():
-    """惰性创建并复用同一个 KnowledgeBase（避免每个会话重复加载向量库）。"""
+    """惰性创建并复用同一个 KnowledgeBase（避免每个会话重复加载向量库）。
+
+    只共享**公共知识库**——用户私有记忆已由 S1 拆分出去（`core/user_memory.py`），
+    Web 场景不参与（见 `_get_engine` 的 `owns_user_data=False`）。
+    """
     global _shared_kb
     if _shared_kb is None:
         from core.knowledge_base import KnowledgeBase
@@ -87,9 +91,13 @@ def _get_engine(session_id: str, api_key: str) -> RAGEngine:
             return ent["engine"]
         _sessions.pop(session_id, None)        # Key 变了 → 丢弃旧引擎
 
-    engine = RAGEngine(api_key=api_key or None)
+    # owns_user_data=False：Web 访客既不拥有本地会话存档，也不参与 L4 长期记忆
+    #   · 会话仅存在于内存（本引擎实例）——不再写生产 session_state.json
+    #   · L4 使用 NullMemoryStore——不读不写生产 chroma_user_memory，
+    #     也就彻底消除了"跨访客共享用户记忆"（ROADMAP 短板 #17① / #18）
+    engine = RAGEngine(api_key=api_key or None, owns_user_data=False)
     try:
-        engine.kb = _get_shared_kb()           # 复用向量库连接
+        engine.kb = _get_shared_kb()            # 只共享公共知识库（只读）
     except Exception:
         pass
     engine.create_session()                     # 建立该引擎的会话上下文
