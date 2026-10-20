@@ -32,8 +32,23 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-#: 工作流文件（相对项目根）
-WORKFLOW_PATH = Path("workflows/perception_report.yaml")
+def _workflow_path() -> Path:
+    """工作流文件路径 —— **必须**走 `resource_path`，不能依赖 cwd。
+
+    ★ 2026-10-20 修：第一版是 `Path("workflows/perception_report.yaml")`，
+      相对路径按**进程 cwd** 解析。用户从别的目录启动（`python E:/x/main.py`）
+      就找不到；打包后更是完全指错（包内资源在 `_MEIPASS` 下）。
+      实测后果：打包版 `/perception` 直接报「工作流文件不存在」。
+    """
+    from config import resource_path
+    return resource_path("workflows/perception_report.yaml")
+
+
+#: 兼容旧引用（测试与文档里读的是这个名字）。
+#: ★ 用模块级函数而不是常量：常量在 import 时求值，测试里想 monkeypatch
+#:   cwd / _MEIPASS 就没机会了。
+def _get_workflow_path() -> Path:
+    return _workflow_path()
 
 #: 真实路径必需的指令参数
 REQUIRED_PARAMS = ("n_boxes", "altitude_m", "threshold", "calibration_path")
@@ -154,16 +169,17 @@ def launch(request: Any, *, runner: Any = None,
             return LaunchResult(False, demo=True,
                                 message=f"生成演示校准失败：{type(e).__name__}: {e}")
 
-    if not WORKFLOW_PATH.is_file():
+    wf_path = _workflow_path()
+    if not wf_path.is_file():
         return LaunchResult(False, demo=prepared.demo,
-                            message=f"工作流文件不存在：{WORKFLOW_PATH}")
+                            message=f"工作流文件不存在：{wf_path}")
 
     # ② 后台启动（与 handoff 共用执行器）
     try:
         if runner is None:
             from core import handoff as _h
             runner = _h.get_runner()
-        yaml_text = WORKFLOW_PATH.read_text(encoding="utf-8")
+        yaml_text = wf_path.read_text(encoding="utf-8")
         handle = runner.submit_yaml(yaml_text, prepared.inputs)
     except Exception as e:                                   # noqa: BLE001
         return LaunchResult(False, demo=prepared.demo,
@@ -240,6 +256,6 @@ def wait_for_report(run_id: str, *, runner: Any = None,
 
 __all__ = [
     "DEFAULT_REPORT_TIMEOUT", "DEMO_DEFAULTS", "LaunchResult",
-    "REQUIRED_PARAMS", "WORKFLOW_PATH", "build_inputs", "help_text",
+    "REQUIRED_PARAMS", "_workflow_path", "build_inputs", "help_text",
     "launch", "wait_for_report",
 ]

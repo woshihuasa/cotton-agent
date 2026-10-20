@@ -65,12 +65,23 @@ def build_updater() -> None:
     """构建 updater.exe（无 GUI 最小程序）并复制到安装目录。"""
     print("== 构建 updater.exe ==")
     paths.ensure()
+    # ★★ 2026-10-20 修：**必须传 `.spec`，不能传 `.py`**。
+    #
+    #   传 `.py` 时 PyInstaller 会**自动生成** `updater.spec` 并写回仓库根，
+    #   而生成版第 5 行写死绝对路径 `E:\cotton_agent\updater_runner.py`。
+    #   结果就是：仓库里那份已修好的 spec（用 `__file__` 推导根目录，
+    #   注释原话「别人 clone 下来打包必然失败」）**每次构建都被静默回滚**。
+    #
+    #   传 `.spec` 时 PyInstaller 以它为准，**不会**再生成 —— 修复得以保留。
+    #   附带好处：spec 里已声明 console=True、EXE 单文件，不用再传 `--onefile`。
+    spec_file = ROOT / "updater.spec"
+    if not spec_file.is_file():
+        raise SystemExit(f"缺少 updater.spec：{spec_file}")
     cmd = [
         sys.executable, "-m", "PyInstaller",
-        "--onefile", "--noconfirm", "--name", "updater",
-        "--console",
+        "--noconfirm",
         *paths.spec_args(),
-        str(ROOT / "updater_runner.py"),
+        str(spec_file),
     ]
     subprocess.run(cmd, cwd=ROOT, check=True)
     updater_exe = paths.UPDATER_EXE

@@ -1965,8 +1965,11 @@ class CottonAgentWindow(QMainWindow):
                 entries.append(PickerEntry("sep"))
             entries.append(PickerEntry("header", str(spec.get("label") or name)))
             models = spec.get("models") or [spec.get("default_model")]
+            # ★ 过滤**非对话模型**（语音 / 图像 / 视频）—— 登记表是完整目录，
+            #   但候选表里选到它们只会在调用时报错，不该出现在这里。
+            _non_chat = getattr(providers, "NON_CHAT_MODELS", frozenset())
             for m in models:
-                if not m:
+                if not m or m in _non_chat:
                     continue
                 entries.append(PickerEntry(
                     "item", str(m), data=(name, str(m)),

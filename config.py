@@ -64,6 +64,24 @@ def app_data_dir() -> Path:
     return bootstrap.app_data_dir()
 
 
+# ★ tiktoken 词表缓存目录（2026-10-20 加）。
+#
+# 为什么放在 `config` 的模块顶层：`config` 会被**所有**入口 import
+# （`main.py` / `server.py` / `mcp_server.py` / 各守卫脚本），
+# 放在这里就一处覆盖全部；放在 main.py 则只覆盖桌面端。
+#
+# 为什么必须钉住：`tiktoken` 找不到缓存时会去
+# `openaipublic.blob.core.windows.net` 下载词表。它的默认查找位置是
+# `tempfile.gettempdir()/data-gym-cache`，而本机 `%TEMP%` 不可写 →
+# `gettempdir()` 退化到**当前工作目录**且结果被缓存 → 目录随 cwd 变。
+# 实测后果：打包版离线直接抛 `SSLError`；守卫 `check_handoff` 时绿时红。
+try:
+    bootstrap.tiktoken_cache_dir()
+except Exception:                                         # noqa: BLE001
+    # 永不因为缓存目录失败而阻止 import —— 与 app_data_dir 同一条纪律
+    pass
+
+
 def app_version() -> str:
     """应用版本号。
 
@@ -187,7 +205,7 @@ class AppConfig:
     DEEPSEEK_BASE_URL: str = os.getenv(
         "DEEPSEEK_BASE_URL", "https://api.deepseek.com"
     )
-    DEEPSEEK_MODEL: str = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")
+    DEEPSEEK_MODEL: str = os.getenv("DEEPSEEK_MODEL", "deepseek-flash")
 
     # ── 默认模型服务商（`core/providers.py` 的登记名）──
     #
@@ -268,7 +286,7 @@ def reload_config() -> None:
             # .env 中删除了该键 → 回退默认值
             defaults = {
                 "DEEPSEEK_BASE_URL": "https://api.deepseek.com",
-                "DEEPSEEK_MODEL": "deepseek-v4-flash",
+                "DEEPSEEK_MODEL": "deepseek-flash",
                 "EMBEDDING_BASE_URL": "https://api.siliconflow.cn/v1",
                 "EMBEDDING_MODEL": "BAAI/bge-large-zh-v1.5",
                 "GITHUB_OWNER": "woshihuasa",

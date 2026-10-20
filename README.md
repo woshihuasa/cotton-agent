@@ -1,6 +1,6 @@
 # 棉花种植决策智能体（CottonMind）
 
-面向新疆棉花种植场景的智能问答与决策系统：**桌面端（PyQt6）+ Web 端（FastAPI）**，
+面向新疆棉花种植场景的智能问答与决策系统：**桌面端应用（PyQt6）**，
 内核是「检索增强 + 四层记忆 + 工具编排 + 工作流引擎」。
 
 ---
@@ -24,10 +24,9 @@
 
 **技能库（程序性记忆）** 是 L4 容器的第三库，两条来源方向相反：
 
-- **技能结晶档**（自下而上）：引擎从成功工具调用轨迹中零 LLM 沉淀经验条目，本机私有；
-- **手写技能**（自上而下）：`skills/` 下人写的编排指导，随版本分发、只读挂载。
+- **技能结晶档**：引擎从成功工具调用轨迹中零沉淀的程序性记忆（skill）；
+- **手写技能**：`skills/` 下手写的skill。
 
-高命中的结晶条目经人审后可晋升为手写技能。
 
 ### 工具调用与三层防线
 基于模型原生 Function Calling 的多轮工具循环，内置六个工具：天气查询、联网搜索、
@@ -44,8 +43,7 @@
 注解放在与 schema 平行的表里（不污染 `TOOL_SCHEMAS` 的单一真相），
 未声明即按「非只读 · 可能破坏 · 开放世界」处理，**漏声明的失败方向是更严**。
 
-### 编排层（工作流引擎）
-把"一步步调工具"变成**可声明、可校验、可续跑**的工作流。
+### 编排层（workflow引擎）
 它是一条**并行第二路径**，不替代原有工具循环；只有明确写成工作流的长任务才进这里。
 
 - **可声明**：流程写在 YAML 里，能 diff、能 code review、能被守卫校验；
@@ -56,7 +54,7 @@
 节点级重试（**仅幂等节点**）+ 指数退避、超时、`fail_fast`/`degrade`/`skip_if_optional` 失败策略、熔断。
 
 主链路与编排层之间由 **移交机制**（`core/handoff.py`）衔接：工具循环轮次撞墙时，
-把已跑过的调用打包交给编排层续跑，**不猜"还剩哪些目标要查"**，做不到就如实告知"链条没走完"。
+把已跑过的调用打包交给编排层续跑。
 
 ### 分级网关与不确定性门控
 三道**正交**闸门，各管一件事：
@@ -74,22 +72,20 @@
 ### 上下文预算与提示分层
 L1 组装有五个来源（L3 摘要 / L4 记忆 / 结晶档 / 手写技能 / 背景知识），
 预算分两级：**逐源硬上限**（防单源吞掉整个窗口）→ **全局代价最小化**（按 `priority / cost` 贪心填充）。
-`BudgetRow` 逐源记录 `original_cost / final_cost / kept / truncated / dropped`，
-把"prompt 为什么这么长"从猜测变成可复盘的事实。
+`BudgetRow` 逐源记录 `original_cost / final_cost / kept / truncated / dropped`。
 
 提示分层（`core/prompt_layers.py`）让**上下文缓存命中**可测量：稳定段（含每日只变一次的日期）
 在前、易变内容在后，`stable_hash` 进日志，守卫断言同一日期内恒定 ——
 任何"把可变内容插进前缀"的改动都会被当场抓住。
 
 ### 多服务商接入
-`core/providers.py` 是「哪家、什么端点、要什么 key、有什么坑」的唯一真相。
-三条硬规则：**缺 key 必须报错、不许静默换一家**（否则指标口径悄悄变了）；
-**judge 不走 failover**（评测中途换模型 = 两个评委打分，比没有分数更糟）；
-**错误分两类**——换一家会改变结果的可重试，否则直接报错。
+支持多种api服务商接入，由网关统一管理。
 
-### 感知层与轨迹
+### 感知层与轨迹（目前仅有框架，功能未上线）
 - **感知层**（`core/perception/`）：密度估计 + 分层校准 → 带区间的估计 → 不确定性门控 → 决策报告。
   输出是**估计量而非真值**，故必须过门控才允许下结论。
+  对话中输入 `/perception` 即端到端触发这条链（`workflows/perception_report.yaml`：
+  契约 → 门控 → Markdown 报告），**不经过 LLM**。
 - **轨迹**（`core/trajectory.py`）：录制全保真原始轨迹，导出为 ShareGPT 格式（纯函数派生，
   格式改了只重导、不必重跑问答）。`TRAJECTORY_PATH` 为空即关闭（**路径本身就是配置**）。
 
@@ -99,11 +95,10 @@ L1 组装有五个来源（L3 摘要 / L4 记忆 / 结晶档 / 手写技能 / �
 
 | 层次 | 选型 |
 |------|------|
-| LLM / Embedding | DeepSeek / 千问 Token Plan / 硅基流动（OpenAI 兼容接口） |
+| LLM / Embedding | LLM可兼容多种服务商 / 硅基流动（OpenAI 兼容接口） |
 | RAG | LangChain + ChromaDB |
 | 数据处理 | pandas + numpy + matplotlib |
-| UI | PyQt6（桌面端）· 原生 HTML/JS（Web 端） |
-| 服务化 | FastAPI + SSE |
+| UI | PyQt6 |
 | 工具暴露 | MCP Python SDK（stdio 传输） |
 | 打包 | PyInstaller（onedir）+ 自动更新器 |
 
@@ -140,7 +135,6 @@ UI **只能**查询"是否已配置"与指纹，**永远拿不到完整密钥**�
 python build_kb.py                    # 全量构建知识库（data/ 下的 PDF/TXT/MD）
 python tools/kb_admin.py sync         # 增量同步：只重新处理有变化的文档
 python main.py                        # 启动桌面端
-python server.py                      # 启动 Web 服务（FastAPI + SSE）
 python mcp_server.py                  # 以 MCP 服务端暴露六个工具（stdio）
 ```
 
@@ -159,6 +153,16 @@ python build_release.py               # 构建 → 剔除运行期残留 → 签
 
 产物统一收纳在 `release/`（路径常量集中在 `paths.py`，是单一真相）。
 发布前会跑 `tests/check_secrets.py` 自检 —— **不过就不压缩**（防止把 `.env` 打进发布包）。
+
+**运行期资产必须随包分发**，否则对应功能在打包版直接失效。当前清单（`cotton_agent.spec` 的 `datas`）：
+
+| 资产 | 缺了会怎样 |
+|---|---|
+| `data/` `skills/` `web/` `ui/icons/` `build_version.txt` | 知识库 / 技能 / 页面 / 图标 / 版本号失效 |
+| `workflows/` | `/perception` 报"工作流文件不存在"、`/workflow` 页面恒空 |
+| `prompts/` | `llm.decide` / `llm.summarize` 节点必失败（`prompt_ref` 是必填） |
+| `data-gym-cache/` | token 计数在**离线**环境会去 OpenAI 下载词表，无网即报错 |
+
 
 ---
 
@@ -185,20 +189,16 @@ python tests/run_all.py               # 产物: eval_report.md（自动区块重
 
 | 脚本 | 测什么 |
 |---|---|
-| `eval_procedural.py` | 技能库检索质量（20 条「问题 → 期望路线」+ 4 条已知边界） |
+| `eval_procedural.py` | 技能库检索质量（25 条「问题 → 期望路线」+ 4 条已知边界） |
 | `eval_skill_acceptance.py` | 技能 `acceptance` 用例端到端（工具选择层 + 结晶档首次触发） |
 | `eval_scenarios.py` | 产物级场景评测 —— 断言「机制是否触发」，而非「答案像不像」 |
 | `eval_error_injection.py` | 感知误差注入（零 LLM、零外部数据） |
 | `eval_judge_agreement.py` | judge 一致性 —— 用多个**独立评委**复核同一批真实回答 |
 | `eval_judge_defects.py` | judge **阳性对照** —— 用"已知有缺陷的回答"测评委的判别力 |
 
-> 最后两个的存在理由值得单说：`eval_generation.py` 里的 judge 与被测系统**曾是同一个模型**
-> （同模型自评 —— 模型倾向认为自己风格的答案更好，且它一贯理解错的点也会判对），
-> 因此当时报出的忠实度指标带一个未标注的前提。这两个实验就是把那个前提**显式测出来** ——
-> 见 `docs/LLM_GATEWAY.md`。
 
-**回归守卫**共 **36 个**（`check_*.py` / `smoke_*.py`），绝大多数**零成本**（不调 LLM），
-适合改动后随手执行。按主题分组：
+**回归守卫**共 **36 个**（34 个 `check_*.py` + 2 个 `smoke_*.py`），
+加上 11 个 `eval_*.py` 评测脚本，`tests/` 合计 **47 个脚本 / 1,198 条断言**；
 
 | 主题 | 守卫 |
 |---|---|
@@ -210,38 +210,17 @@ python tests/run_all.py               # 产物: eval_report.md（自动区块重
 | 数据与契约 | `check_data_ranges` · `check_kb_freshness` · `check_secrets` · `smoke_mcp` · `check_eval_metrics` · `check_error_injection` |
 | 其他 | `check_imports` · `check_ui_attrs` · `check_interview_docs` |
 
-评测全程运行在隔离沙箱中（会话存档与记忆库均为副本），**不会触碰生产数据**。
-守卫会为每次运行建一个 `cotton_test_*` 临时目录做隔离 ——
-这些目录内含**真实 `.env` 的副本**，因此已在 `.gitignore` 中整体忽略。
-
-> ⚠️ **一个已知取舍**：`tests/eval_fixtures/`（约 17.7 MB 固定数据）不进仓库。
-> 代价是**克隆仓库后跑不了依赖 fixture 的评测**；若需要，请向维护者索取。
-
 ---
 
-## 五、仓库约定：哪些内容不进版本控制
+## 五、不进版本控制的文件
 
-除常规的构建产物与缓存外，有几类**刻意排除**的路径，各自的理由不同：
-
-| 路径 | 为什么不进仓库 |
-|---|---|
-| `.env` / `credentials.json` / `providers.json` | **含明文密钥**。后两者当前是空壳，但用户在界面填一次 Key 就会含真实凭据 |
-| `cotton_test_*/` | 守卫的隔离目录，内含**真实 `.env` 副本** —— 提交等于扩散密钥 |
-| `procedural_memory/` | 技能结晶档：引擎从**本机轨迹**生成，属本机私有，绝不入库 |
-| `chroma_db/` `chroma_user_memory/` | 本地向量库与用户记忆（含个人数据） |
-| `session_state.json*` | 会话存档（含对话内容） |
-| `docs/` | 设计与决策记录，当前**暂为本地文档**。若要公开，需先修订 `.gitignore` 的放行策略 |
-| `reports/` `charts/` `workflows/runs/` | 运行时产物 |
-| `release/` `dist/` `build/` `*.zip` | 构建产物 |
-
-**反过来，有几类必须进 git**（否则项目无法自洽）：
-
-- `workflows/*.yaml` —— 工作流**权威定义**，要能 diff 与 code review（只忽略 `runs/` 运行态）；
-- `skills/` —— 手写技能是"人写"档，生命周期归 git 管（见 `docs/ARCHITECTURE.md`）；
-- `tests/eval_data/*.jsonl` —— 评测集，指标的可复现性依赖它。
-
-> 判据来自项目的**核心不变量**：**运行区的物理目录只放「不是人写在 git 里的东西」。
-> 凡是人写进 git 的，一律挂载只读，不复制** —— 复制会造成两份真相，而守卫守不住两份真相。
+- **密钥与凭据**：`.env`、`credentials.json`、`providers.json`
+- **本地数据**：`session_state.json*`、`chroma_db/`、`chroma_user_memory/`、`procedural_memory/`
+- **运行时产物**：`reports/`、`charts/`、`workflows/runs/`、`*.log`
+- **构建产物**：`release/`、`dist/`、`build/`、`*.zip`、`build_version.txt`
+- **临时与缓存**：`tests/eval_outputs/`、`tests/eval_fixtures/`、`data-gym-cache/`、`cotton_test_*/`、`tmp*/`、`.mplconfig/`、`torchinductor_*/`
+- **本地文档与脚本**：`docs/`、`_*.md`、`_*probe*.py`
+- **通用**：`__pycache__/`、`.venv/`、`.idea/`、`.vscode/`、`.reasonix/`
 
 ---
 
@@ -250,9 +229,8 @@ python tests/run_all.py               # 产物: eval_report.md（自动区块重
 ```
 cotton_agent/
 ├── main.py                    # 桌面端入口（bootstrap → 日志/excepthook → config → UI）
-├── server.py                  # Web 服务入口（FastAPI + SSE）
 ├── mcp_server.py              # MCP 服务端（stdio）
-├── bootstrap.py               # 启动引导：可写数据目录探测 + 临时目录重定向 + .env 查找
+├── bootstrap.py               # 启动引导：可写数据目录探测 + 临时目录重定向 + tiktoken 词表缓存钉死 + .env 查找
 ├── config.py                  # 全局配置（三区分离：资源 / 运行数据 / 构建产物）
 ├── paths.py                   # 构建产物路径单一真相（release/ 布局）
 ├── build_kb.py                # 知识库全量构建
@@ -292,51 +270,21 @@ cotton_agent/
 │   ├── cotton_stats.py / cotton_price.py / trend_plot.py / yield_analysis.py
 │   ├── config_manager.py      # 设置读写
 │   ├── updater.py             # 更新检查
-│   ├── web_server.py          # Web 服务实现（可嵌入，桌面端一键启停）
 │   └── llm_client.py          # LLM API 封装
 ├── skills/                    # ★ 手写技能（随版本分发，只读挂载）
 ├── workflows/                 # ★ 工作流 YAML（权威定义；runs/ 为运行态，已忽略）
-├── prompts/                   # 提示词资产
+├── prompts/                   # ★ 提示词资产：llm.decide / llm.summarize 节点的 prompt_ref 依赖（必填）
 ├── tools/
 │   ├── kb_admin.py            # 知识库维护 CLI
 │   └── export_trajectory.py   # 轨迹导出为 ShareGPT
 ├── ui/                        # PyQt6 界面（主窗口 / 设置 / 服务商编辑器 / 侧栏）
 ├── tests/                     # 评测（eval_*）+ 回归守卫（check_* / smoke_*）
 ├── data/                      # RAG 文档源（按主题分目录）
-├── web/                       # Web 前端页面（对话页 + 工作流页）
-├── docs/                      # 设计文档（架构 / 编排 / 感知 / 记忆 / 网关 / 路线图；不进版本控制）
+├── docs/                      # 设计文档（本地文档，不进版本控制）
 ├── reports/                   # 感知分析报告（运行时产物，已忽略）
 ├── release/                   # 构建产物（已忽略）
 └── requirements.txt / requirements.lock.txt
 ```
-
----
-
-## 七、设计文档
-
-`docs/` 下是各子系统的设计与决策记录（文档在公开仓库中默认被忽略，属本地文档）：
-
-| 文档 | 内容 |
-|---|---|
-| `ARCHITECTURE.md` | 目录与信任架构（两个根 / 三档生产方式 / 挂载语义 / `SKILL.md` 规范） |
-| `PROCEDURAL_MEMORY.md` | L4 容器与技能库（作用域框架 / 条目定义 / 写入门禁 / 确定性检索） |
-| `ORCHESTRATION.md` | 编排层（节点类型系统 / 执行语义 / 断点 / 确定性门禁） |
-| `HANDOFF.md` | 主链路 ↔ 编排层的移交与续跑 |
-| `AGENT_RUNTIME.md` | Agent 运行时加固（上下文工程 / 工具闸门 / 循环可测性） |
-| `PERCEPTION.md` | 感知层接入规划与契约 |
-| `LLM_GATEWAY.md` | 多服务商接入与 judge 独立性 |
-| `ABSORPTION.md` | 参照项目的吸收清单（吸收了什么 / 拒绝了什么） |
-| `ROADMAP.md` | 能力现状、已知短板与升级方向 |
-
-**几条贯穿全项目的工程纪律**（详见各文档）：
-
-- **单一真相** —— 工具契约、地区名单、作用域判据、服务商登记、构建路径，各只有一份实现；
-  「两份真相」是本项目反复在防的头号问题。
-- **失败方向要安全** —— 闸门抛异常一律拒绝（守卫抛异常时若放行，等于没守卫）；
-  未声明能力按更严处理；解析失败**回灌模型**而非静默降级。
-- **判死优于挂起** —— 无法落地的设计明确判死或给出**可触发的复活条件**，
-  避免长期挂着产生决策内耗。
-
 ---
 
 ## License

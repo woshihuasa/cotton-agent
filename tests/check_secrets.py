@@ -45,6 +45,24 @@ FORBIDDEN_NAMES = {".env", ".env.local", "runtime_data", "data-gym-cache",
                    "startup_error.log", "faulthandler.log", "cotton_app.log"}
 FORBIDDEN_SUFFIXES = (".log",)
 
+# ★★ `_internal/` 是 PyInstaller 的**资产目录** —— 内容由 `spec` 的 `datas` 决定，
+#    与发布目录顶层的"运行期产物"是两回事。
+#
+#    2026-10-20 修：`data-gym-cache` 是**双身份**同名 ——
+#      · 顶层出现 = langchain 数据加载器写在 cwd 的缓存 → 该拦
+#      · `_internal/` 里出现 = `spec` **主动打包**的 tiktoken 词表 → 必须放行
+#    一刀切导致：`build_release` 的 `junk_filter` 修好之后，
+#    本自检又把 `_internal/data-gym-cache/` 判成运行期产物 → 构建中止。
+#    **两侧规则必须同步**，否则修复会在另一侧被拦下。
+ASSET_DIR = "_internal"
+ASSET_ALLOWED = {"data-gym-cache"}
+
+
+def is_allowed_asset(rel: str, name: str) -> bool:
+    """`_internal/<ASSET_ALLOWED>` 属于打包资产，不算运行期产物。"""
+    return (name in ASSET_ALLOWED
+            and ASSET_DIR in Path(rel).parts)
+
 # 值短于这个长度就不适合当搜索目标（误报太多，也没实际泄露价值）
 MIN_SECRET_LEN = 16
 
@@ -89,11 +107,13 @@ def scan_tree(tree: Path, needles: list[tuple[str, bytes]]) -> tuple[list[str], 
     scanned = 0
     for root, dirs, files in os.walk(tree):
         for name in list(dirs):
-            if name in FORBIDDEN_NAMES:
-                name_hits.append(str(Path(root, name).relative_to(tree).as_posix()) + "/")
+            rel = str(Path(root, name).relative_to(tree).as_posix())
+            if name in FORBIDDEN_NAMES and not is_allowed_asset(rel, name):
+                name_hits.append(rel + "/")
         for name in files:
             rel = Path(root, name).relative_to(tree).as_posix()
-            if name in FORBIDDEN_NAMES or name.endswith(FORBIDDEN_SUFFIXES):
+            if (name in FORBIDDEN_NAMES and not is_allowed_asset(rel, name)) \
+                    or name.endswith(FORBIDDEN_SUFFIXES):
                 name_hits.append(rel)
             try:
                 data = Path(root, name).read_bytes()

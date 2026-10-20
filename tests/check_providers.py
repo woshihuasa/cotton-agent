@@ -94,12 +94,18 @@ def main() -> int:
     c.check("★ compat 里记了 `supportsDeveloperRole=false`（不能发 role:developer）",
             any("supportsDeveloperRole" in s for s in P["qwen"].compat),
             str(P["qwen"].compat))
-    c.check("千问的模型目录来自 DSH（20 个）", len(P["qwen"].models) == 20,
-            str(len(P["qwen"].models)))
-    c.check("★ 目录含跨厂商模型（DeepSeek / GLM / Kimi / MiniMax 都在）",
+    c.check("千问的模型目录来自端点 `/models` 实测（19 个）",
+            len(P["qwen"].models) == 19, str(len(P["qwen"].models)))
+    # ★ 原断言是「DeepSeek / GLM / **Kimi / MiniMax** 都在」—— 已过期。
+    #   端点实测（2026-10-20）不再提供 kimi-* 与 MiniMax 系列，故改为断言
+    #   **仍在供应的**跨厂商模型；跨厂商评审仍可用（智谱 GLM）。
+    c.check("★ 目录含跨厂商模型（DeepSeek / GLM 都在）",
             all(any(m.startswith(pref) for m in P["qwen"].models)
-                for pref in ("deepseek-", "glm-", "kimi-", "MiniMax")),
+                for pref in ("deepseek-", "glm-")),
             str(P["qwen"].models))
+    c.check("★ 已下线的厂商**不再登记**（Kimi / MiniMax 端点已无）",
+            not any(m.startswith(("kimi-", "MiniMax")) for m in P["qwen"].models),
+            str([m for m in P["qwen"].models if m.startswith(("kimi-", "MiniMax"))]))
     c.check("目录含 `deepseek-v4.1-flash`（与生产模型同厂商，可做版本对照）",
             "deepseek-v4.1-flash" in P["qwen"].models)
 

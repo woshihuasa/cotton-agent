@@ -86,6 +86,18 @@ a = Analysis(
         (str(ROOT / "web"), "web"),
         (str(ROOT / "ui" / "icons"), "ui/icons"),
         (str(ROOT / "build_version.txt"), "."),
+        # ★ 运行期资产，2026-10-20 补：
+        #   `workflows/` 是编排层的**权威定义**（决策 3a）—— 没有它，
+        #     `/perception` 报「工作流文件不存在」、`/workflow` 页面恒空。
+        #   `prompts/` 是 `llm.decide` / `llm.summarize` 节点的**必填依赖**
+        #     （`prompt_ref` 是 required 参数）—— 没有它，任何 llm 节点必失败。
+        #   两者原先都不在 datas 里，打包版两个功能直接是坏的。
+        (str(ROOT / "workflows"), "workflows"),
+        (str(ROOT / "prompts"), "prompts"),
+        # ★ tiktoken 的 BPE 词表（1.6 MB）。没有它，token 计数在**离线**环境
+        #   会去 openaipublic.blob.core.windows.net 下载，无网即抛 SSLError。
+        #   实测触发点：`core/rag_engine.py` 的 `tiktoken.get_encoding("cl100k_base")`。
+        (str(ROOT / "data-gym-cache"), "data-gym-cache"),
     ],
     hiddenimports=[
         # ChromaDB / LangChain 动态导入点

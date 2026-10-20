@@ -376,9 +376,16 @@ def _exec_llm(node: Node, ctx: NodeContext) -> NodeOutcome:
     if not isinstance(schema, dict) or not schema:
         return NodeOutcome(ok=False, error="llm 节点缺少 output_schema（无契约不接受）")
 
-    p = _Path(prompt_ref)
-    if not p.is_absolute():
-        p = _Path(__file__).resolve().parent.parent.parent / prompt_ref
+    # ★ 2026-10-20 修：绝对路径照用；相对路径**必须**走 `resource_path`。
+    #   原来写的是 `Path(__file__).parent.parent.parent / prompt_ref` ——
+    #   打包后 `__file__` 在 `_MEIPASS` 内，这个推导必然指错，
+    #   于是**任何 `llm.decide` / `llm.summarize` 节点在打包版都会失败**
+    #   （`prompt_ref` 是 required 参数，绕不过去）。
+    if _Path(prompt_ref).is_absolute():
+        p = _Path(prompt_ref)
+    else:
+        from config import resource_path
+        p = resource_path(prompt_ref)
     if not p.is_file():
         return NodeOutcome(ok=False, error=f"提示词文件不存在: {p}")
     prompt_text = p.read_text(encoding="utf-8")
@@ -484,9 +491,13 @@ def _exec_gate_review(node: Node, ctx: NodeContext) -> NodeOutcome:
     if not rubric and not rubric_ref:
         return NodeOutcome(ok=False, error="agent_review 需要 rubric 或 rubric_ref（无标准不审查）")
     if not rubric and rubric_ref:
-        rp = _Path(rubric_ref)
-        if not rp.is_absolute():
-            rp = _Path(__file__).resolve().parent.parent.parent / rubric_ref
+        # ★ 2026-10-20 修：与 `prompt_ref` 同一个错误模式（`__file__` 推导），
+        #   打包后 `gate.agent_review` 用文件 rubric 时必然失败。
+        if _Path(rubric_ref).is_absolute():
+            rp = _Path(rubric_ref)
+        else:
+            from config import resource_path
+            rp = resource_path(rubric_ref)
         if not rp.is_file():
             return NodeOutcome(ok=False, error=f"审查要求文件不存在: {rp}")
         rubric = rp.read_text(encoding="utf-8")

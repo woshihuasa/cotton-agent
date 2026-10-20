@@ -203,10 +203,25 @@ def _project_root() -> Path:
 
 
 def _workflows_dir() -> Path:
-    """工作流定义目录（`workflows/*.yaml`，YAML 是权威定义 —— 决策 3a）。"""
-    d = _project_root() / "workflows"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+    """工作流定义目录（`workflows/*.yaml`，YAML 是权威定义 —— 决策 3a）。
+
+    ★★ 2026-10-20 修了两个叠加的错：
+
+      ① **路径推导错**：原先是 `Path(__file__).parent.parent / "workflows"`。
+         打包后 `__file__` 在 `_MEIPASS` 里，推导出来是 `_MEIPASS/workflows` ——
+         而 `workflows/` 当时**根本没打进包**（spec 的 datas 漏了）。
+
+      ② **mkd​ir 掩盖了缺资产**：原代码 `d.mkdir(parents=True, exist_ok=True)`
+         会在包内造出一个**空目录**，于是错误表现从
+         「工作流文件缺失」变成「工作流列表为空」—— 后者看起来像"正常但没数据"，
+         排查成本高得多。**目录若不存在，就该让调用方看见空结果 + 明确日志，
+         而不是伪造一个能用但为空的目录。**
+
+         所以这里**不再建目录**：打包内是只读的，本来也不该建。
+         真要写入（P4 的编辑接口）应写到 `app_data_dir()` 而非资源目录。
+    """
+    from config import resource_path
+    return resource_path("workflows")
 
 
 @app.get("/workflow", response_class=HTMLResponse)

@@ -364,14 +364,76 @@ nodes:
                             enable_thinking=False, reasoning_effort=None):
             yield ("content", "（桩）结论：不适合收。")
 
+    # 临时数据目录：本用例不碰真实 session_state.json / chroma_user_memory
+    import tempfile as _tf_e2e
+    _e2e_dir = _tf_e2e.mkdtemp(prefix="handoff_e2e_")
+    _atexit_e2e = __import__("atexit")
+
+    def _cleanup_e2e() -> None:
+        import shutil as _sh
+        _sh.rmtree(_e2e_dir, ignore_errors=True)
+
+    _atexit_e2e.register(_cleanup_e2e)
+
+    def _stub_io(eng) -> None:
+        """切断本用例的**两条网络来源**，使它真正零网络（2026-10-20 修）。
+
+        `RAGEngine` 里有**两个**各自持有 `OpenAIEmbeddings` 的客户端，
+        桩掉 `llm` 一个都不覆盖：
+
+        | 来源 | 触发点 | 断法 |
+        |---|---|---|
+        | **L4 长期记忆** | `self.memory`（`UserMemoryStore`）→ `search_l4_candidates` | 构造时 `owns_user_data=False`（项目自带 `NullMemoryStore`） |
+        | **知识库检索** | `self.kb`（`KnowledgeBase`）→ query embedding | 换成固定空实现 |
+
+        ★ 为什么要做：本守卫原先**依赖网络**。抓包实测每次 `ask()` 会产生
+          2–4 次连接（`127.0.0.1:7897` 本机代理 → 硅基流动）；代理抖动时抛
+          `SSLError` / `ChunkedEncodingError`，于是同一条断言时绿时红
+          （实测 4 次里错 3 次）。**"偶尔红"的守卫比没有守卫更糟** ——
+          人会开始忽略红色，真 bug 就混过去了。
+
+        ★ 手法与 `check_skill_wiring.py`（检索固定空值）和
+          `check_memory_split.py`（字符袋向量桩件）一致。
+
+        ★ 覆盖面不受损：本用例验的是**移交**（部分结果标记 / `wants_more` /
+          `run_id` / 已完成步数），与检索命中了什么无关。
+        """
+        class _NullKB:
+            def __getattr__(self, name):
+                # 任何检索方法一律返回空 —— 即"无命中"，
+                # 这是生产链路里合法的一种状态（无相关资料时走退化路径）
+                def _empty(*a, **k):
+                    return []
+                return _empty
+
+        eng.kb = _NullKB()
+
     from core.rag_engine import RAGEngine as _RE3
 
     try:
-        e2e = _RE3()
+        # ★ `owns_user_data=False` 会让 RAGEngine 直接用项目自带的
+        #   `NullMemoryStore` —— 这是**设计好的**离线路径（Web 多访客场景同款），
+        #   不是测试自己造的花招。
+        e2e = _RE3(user_data_dir=_e2e_dir, owns_user_data=False)
         e2e.create_session()
         e2e.llm = _E2ELLM()
-        e2e._owns_user_data = True
         e2e._execute_tool = lambda name, args: '{"ok": true, "text": "桩天气"}'
+        _stub_io(e2e)
+        # ★★ 检索固定空值 —— 让本用例**真正零网络**（2026-10-20 修）。
+        #
+        #   为什么必须做：`_E2ELLM` 只替了 `llm` 的三个方法，但 `ask()` 里
+        #   **知识库检索**用的是另一个客户端 —— `self.kb = KnowledgeBase()`，
+        #   它内部的 `OpenAIEmbeddings` 会为 query 算一次真实 embedding
+        #   （实测抓到的网络连接：`127.0.0.1:7897` 本机代理 → 硅基流动）。
+        #
+        #   后果：本守卫**依赖网络**。代理抖动时抛
+        #   `SSLError: ...openaipublic...` 或 `ChunkedEncodingError`，
+        #   于是同一条断言时绿时红（实测 4 次里错 3 次）——
+        #   而"偶尔红"的守卫比没有守卫更糟：人会开始忽略红色。
+        #
+        #   手法与 `check_skill_wiring.py` / `check_memory_split.py` 一致：
+        #   把检索换成固定值。本用例要验的是**移交**（部分结果标记 / wants_more /
+        #   run_id），检索结果与这些断言无关 —— 所以不损失覆盖面。
 
         chunks = list(e2e.ask("这块地能不能收？"))
         text = "".join(ch for k, ch in chunks if k == "content")
@@ -402,11 +464,11 @@ nodes:
                 return _E2EMsg("", n_calls=1) if self._n == 1 else _E2EMsg("答完了")
 
         try:
-            quiet = _RE3()
+            quiet = _RE3(user_data_dir=_e2e_dir, owns_user_data=False)
             quiet.create_session()
             quiet.llm = _E2EQuiet()
-            quiet._owns_user_data = True
             quiet._execute_tool = lambda name, args: '{"ok": true, "text": "桩"}'
+            _stub_io(quiet)          # 同上：两条网络来源都切断
             qtext = "".join(ch for k, ch in quiet.ask("这块地能不能收？")
                             if k == "content")
             c.check("★★★ 对照组：正常结束时**不出现**部分结果标记",
@@ -436,8 +498,30 @@ nodes:
     _orig_exec = _orch_engine._EXECUTORS["tool"]
 
     def _counting_exec(node, ctx):
+        """计数 + **固定桩返回**（不调真工具）。
+
+        ★★ 2026-10-20 修：原先是 `_CALLS["n"] += 1; return _orig_exec(node, ctx)` ——
+          只计数，但**仍然真执行** `tool.get_weather`。抓包实测每次 E2E 会产生
+          2 次真实网络连接（`requests.get` → 高德天气 API，经本机代理
+          `127.0.0.1:7897`）。代理抖动时守卫会抛 `SSLError` /
+          `ChunkedEncodingError`，于是**同一条断言时绿时红**。
+
+        ★ 本步要验的是**"已完成节点不被重复执行"**（靠 `_CALLS` 计数），
+          以及续跑状态机 —— 与"天气数据是什么"无关。
+          所以桩掉返回值即可，覆盖面不受损。
+
+        ★ 产出结构照抄 `engine._exec_tool`：JSON 文本 + 展开到顶层的字段，
+          这样 YAML 里写 `{{w1.xxx}}` 的下游照样能取到值。
+        """
         _CALLS["n"] += 1
-        return _orig_exec(node, ctx)
+        from core.orchestration.engine import NodeOutcome as _NO
+        
+        payload = {"city": "阿拉尔", "weather": "晴", "temp": 18,
+                   "text": "（桩）阿拉尔天气：晴 18℃"}
+        out = {"text": payload["text"], "image_path": None, "image_paths": []}
+        for k, v in payload.items():
+            out.setdefault(k, v)
+        return _NO(ok=True, output=out)
 
     _orch_engine._EXECUTORS["tool"] = _counting_exec
 
@@ -501,7 +585,9 @@ nodes:
                     "天气" in str(_run2.steps["w1"].output or {}))
         finally:
             _orch_store.runs_dir = _old_runs          # type: ignore
-            _orch_engine._EXECUTORS["tool"] = _orig_exec
+            # ★ 不在这里还原工具执行器 —— 后面的流程用例（第 7 步的
+            #   `tool.get_weather` 节点）同样会**真发网络请求**。
+            #   统一到 main() 末尾还原，中途一律用桩。
 
     # ------------------------------------------------------------------
     c.section("第 7 步：★★ 人工签字 —— 拒绝也要能收场")
@@ -509,7 +595,9 @@ nodes:
     with _tf.TemporaryDirectory() as _td2:
         _old2 = _orch_store.runs_dir
         _orch_store.runs_dir = lambda: Path(_td2)     # type: ignore
-        _orch_engine._EXECUTORS["tool"] = _orig_exec  # 用回原始执行器
+        # ★ 原这里是装回真执行器 —— 但本步的 _RESUME_YAML 含 tool.get_weather
+        #   节点，装回去就会真发一次天气请求（实测这是本守卫最后 1 次网络连接）。
+        #   本步验的是签字/打回/熔断，与天气数据无关 → 保持桩即可。
         try:
             _wf2 = _orch_loader.load_text(_RESUME_YAML)
             _e3 = _orch_engine.Engine(_wf2, persist=True)
@@ -674,6 +762,14 @@ nodes:
         c.check(f"★★ {_t8}：白名单 + 执行器表**两处一致**",
                 (_t8 in _cat8.EXECUTABLE_TYPES)
                 and (_e8.executor_for(_t8) is not None))
+
+    # ★ 统一还原被替换的工具执行器（见第 6 步 `_counting_exec` 的说明）。
+    #   中途不还原的原因：第 7 步会再跑一个带 `tool.get_weather` 的流程，
+    #   还原了它就会真发请求 —— 实测那是本守卫最后 1 次网络连接。
+    try:
+        _orch_engine._EXECUTORS["tool"] = _orig_exec
+    except (NameError, KeyError, AttributeError):     # noqa: BLE001
+        pass
 
     print()
     print("=" * 78)

@@ -178,6 +178,68 @@ def ensure_writable_temp(data_dir: Path | None = None) -> Path:
     return target
 
 
+# ── tiktoken 编码缓存 ─────────────────────────────────
+#
+# ★★★ 为什么必须显式钉住（2026-10-20 修）：
+#
+#   `tiktoken.get_encoding("cl100k_base")` 要读一份 1.6 MB 的 BPE 词表。
+#   它自己的查找顺序是：
+#       TIKTOKEN_CACHE_DIR → DATA_GYM_CACHE_DIR → tempfile.gettempdir()/data-gym-cache
+#   最后那条**看起来**没问题，但 `tempfile.gettempdir()` 在本机会退化到
+#   **当前工作目录**（`%TEMP%` 被安全软件的文件系统过滤驱动拦），
+#   而且结果**只算一次就缓存**。
+#
+#   后果有两个，都是实测踩到的：
+#     ① **打包版离线必失败**：包内 cwd 是安装目录，`data-gym-cache/` 没被打包
+#        （spec 的 datas 漏了）→ 找不到 → 去
+#        `openaipublic.blob.core.windows.net` 下载 → 无网/被拦就抛 SSLError。
+#     ② **守卫会 flaky**：哪个测试先 `chdir`，`gettempdir()` 的缓存值就跟着变，
+#        于是同一条断言时绿时红（实测 `check_handoff` 4 次里错 3 次）。
+#
+#   钉死到一个**与 cwd 无关**的位置，两个问题一起消掉。
+_TIKTOKEN_SUBDIR = "data-gym-cache"
+_TIKTOKEN_FILE = "9b5ad71b2ce5302211f9c61530b329a4922fc6a4"   # cl100k_base 的缓存名
+
+
+def tiktoken_cache_dir(data_dir: Path | None = None) -> Path:
+    """返回 tiktoken 词表缓存目录（**不依赖 cwd**）并写入环境变量。
+
+    打包模式：包内 `_MEIPASS/data-gym-cache`（随 spec 的 datas 分发，离线可用）。
+    开发模式：项目根 `data-gym-cache/`。
+
+    ★ 幂等；调用方已显式设置 `TIKTOKEN_CACHE_DIR` 时**尊重它**。
+    """
+    explicit = os.environ.get("TIKTOKEN_CACHE_DIR", "").strip()
+    if explicit:
+        return Path(explicit)
+
+    if IS_FROZEN:
+        base = Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent))
+        cand = base / _TIKTOKEN_SUBDIR
+        if cand.is_dir():
+            os.environ["TIKTOKEN_CACHE_DIR"] = str(cand)
+            return cand
+        # 包内没有 → 落到数据目录（可写，首次调用时会下载并缓存）
+        cand = (data_dir or app_data_dir()) / _TIKTOKEN_SUBDIR
+        cand.mkdir(parents=True, exist_ok=True)
+        os.environ["TIKTOKEN_CACHE_DIR"] = str(cand)
+        return cand
+
+    cand = Path(__file__).resolve().parent / _TIKTOKEN_SUBDIR
+    if cand.is_dir():
+        os.environ["TIKTOKEN_CACHE_DIR"] = str(cand)
+        return cand
+    cand.mkdir(parents=True, exist_ok=True)
+    os.environ["TIKTOKEN_CACHE_DIR"] = str(cand)
+    return cand
+
+
+def tiktoken_cache_ready(data_dir: Path | None = None) -> bool:
+    """词表是否已缓存（已缓存 = 运行期不需要联网）。"""
+    d = tiktoken_cache_dir(data_dir)
+    return (d / _TIKTOKEN_FILE).is_file()
+
+
 # ── .env 查找 ─────────────────────────────────────────
 
 

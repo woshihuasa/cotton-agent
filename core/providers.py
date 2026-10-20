@@ -55,22 +55,38 @@ class Provider:
     compat: tuple[str, ...] = ()
 
 
-#: 千问 Token Plan 的 20 个模型（来源：DSH 的 `qwen-token-plan-cn.json`）。
-#: 实测 `/models` 返回 17 个（部分模型可能按订阅档位放开）。
+#: 千问 Token Plan 的模型（来源：该端点 `/models` 实测返回）。
+#: ★ 含非对话模型（语音 / 图像 / 视频）—— 登记表是**完整目录**，
+#:   不代表都能当对话模型用。
 QWEN_MODELS: tuple[str, ...] = (
+    # 路由别名
+    "auto", "decision-model-preview",
     # 阿里 Qwen
-    "qwen3.6-flash", "qwen3.6-plus", "qwen3.7-max", "qwen3.7-plus",
+    "qwen3.6-flash", "qwen3.7-max", "qwen3.7-plus",
     "qwen3.8-flash", "qwen3.8-max",
     # DeepSeek（三方托管）
-    "deepseek-v3.2", "deepseek-v4-flash", "deepseek-v4-flash-0731",
-    "deepseek-v4-pro", "deepseek-v4-pro-0813", "deepseek-v4.1-flash",
+    "deepseek-v4-flash-0731", "deepseek-v4-pro", "deepseek-v4-pro-0813",
+    "deepseek-v4.1-flash", "deepseek-v4.1-flash-1017",
     # 智谱 GLM
-    "glm-5", "glm-5.1", "glm-5.2", "glm-5.3",
-    # 月之暗面 Kimi
-    "kimi-k2.5", "kimi-k2.6", "kimi-k2.7-code",
-    # MiniMax
-    "MiniMax-M2.5",
+    "glm-5.2", "glm-5.3",
+    # 语音
+    "qwen-audio-3.0-realtime-plus", "qwen-audio-3.0-tts-plus",
+    # 图像 / 视频
+    "wan2.7-image", "wan2.7-image-pro", "wan3.0-video",
 )
+
+#: 登记表里**不能当对话模型用**的条目（语音 / 图像 / 视频）。
+#:
+#: ★ 它们**仍留在 `models` 里** —— 登记表是"这家供什么"的**完整目录**，
+#:   删掉会让目录失真。过滤发生在**消费端**（界面的模型候选表），
+#:   这样"目录完整"与"候选可用"两件事各自成立。
+NON_CHAT_MODELS: frozenset[str] = frozenset({
+    "qwen-audio-3.0-realtime-plus",
+    "qwen-audio-3.0-tts-plus",
+    "wan2.7-image",
+    "wan2.7-image-pro",
+    "wan3.0-video",
+})
 
 PROVIDERS: dict[str, Provider] = {
     "deepseek": Provider(
@@ -78,8 +94,10 @@ PROVIDERS: dict[str, Provider] = {
         label="DeepSeek（官方）",
         base_url="https://api.deepseek.com",
         key_env="DEEPSEEK_API_KEY",
-        default_model="deepseek-v4-flash",
-        models=("deepseek-v4-flash",),
+        # ★ 规范名以官方 `/models` 为准（其错误信息明示这两个）：
+        #   `deepseek-v4-flash` 仍返回 200，但属旧别名，不登记。
+        default_model="deepseek-flash",
+        models=("deepseek-flash", "deepseek-v4-pro"),
     ),
     "qwen": Provider(
         name="qwen",

@@ -45,7 +45,11 @@ SIGNTOOL = Path(r"C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\si
 DEFAULT_THUMBPRINT = "590009552AB76FC5F94FF52813A19D21558D0D21"
 TIMESTAMP_URL = "http://timestamp.sectigo.com"   # digicert 的 http 已不可达、https 被旧版 signtool 拒
 
-# 运行期产物：这些名字出现在发布目录顶层就剔除（更深层的由 check_secrets.py 兜住）
+# 运行期产物：这些名字出现在**发布目录顶层**就剔除（`_internal/` 之内不动）。
+# ⚠️ 注意 `data-gym-cache` 现在是**双身份**：
+#    · 顶层出现时 = langchain 数据加载器写在 cwd 的缓存 → **剔除**
+#    · `_internal/` 里出现时 = `spec` 打包的 tiktoken 词表 → **必须保留**
+#    由 `junk_filter` 里的 `_internal` 判断区分，不要在这里删掉这条规则。
 JUNK_NAMES = {
     "runtime_data",          # 降级数据目录 —— 可能含真 .env，最危险的一个
     "data-gym-cache",        # langchain 数据加载器在工作目录下的缓存
@@ -54,9 +58,47 @@ JUNK_NAMES = {
     "cotton_app.log",
 }
 
+# `_internal/` 内**仍需剔除**的子项。
+#
+# ★ 为什么 `_internal/` 不能一律"不动"：`spec` 的 `datas` 是**整目录复制**的，
+#   源码树里混着运行期状态时，它会被一起打进包。
+#
+# 键 = 相对于 `_internal/` 的父目录路径；值 = 要丢掉的名字。
+ASSET_PRUNE: dict[str, set[str]] = {
+    # `workflows/runs/` 是工作流**运行记录**：应用读的是
+    # `app_data_dir()/workflows/runs`（见 `core/orchestration/store.py::runs_dir`），
+    # **不会读包内这份**。分发它只是无用负载，还会把开发机的测试记录带给用户。
+    "workflows": {"runs"},
+}
+
 
 def junk_filter(directory: str, names: list[str]) -> set[str]:
-    """shutil.copytree 的 ignore 回调：只剔除运行期产物，不动 _internal。"""
+    """shutil.copytree 的 ignore 回调：剔除运行期产物，但保住打包资产。
+
+    规则分两层：
+
+    | 位置 | 处理 |
+    |---|---|
+    | **发布目录顶层** | 剔除 `JUNK_NAMES` / `*.log` / `tmpXXXXXXXX` |
+    | **`_internal/` 之内** | **默认不动**（内容由 `spec` 的 `datas` 决定），但按 `ASSET_PRUNE` 剔除"混进资产的运行期状态" |
+
+    ★★ 2026-10-20 修：docstring 一直写着"不动 `_internal`"，但代码**没做到** ——
+      `skip` 在每一层都生效，于是 `_internal/data-gym-cache/` 被 `JUNK_NAMES`
+      命中并剔除。后果：`spec` 明明把 tiktoken 词表打进了包（`dist/` 里确实有），
+      复制到发布目录时又被删 —— **打包版离线分词依然会去 OpenAI 下载**，
+      修复静默失效。实测：`dist/_internal/data-gym-cache` 存在，
+      `CottonAgent-v0.4.0/_internal/data-gym-cache` 不存在。
+
+      `_internal/` 是 PyInstaller 的**资产目录** —— 打包配置说它该在，
+      就不该在这一步被删；只有 `ASSET_PRUNE` 里**显式列出**的才丢。
+    """
+    parts = Path(directory).parts
+    if "_internal" in parts:
+        # 相对 `_internal/` 的路径，用于查 ASSET_PRUNE
+        rel = "/".join(parts[parts.index("_internal") + 1:])
+        drop = ASSET_PRUNE.get(rel)
+        return {n for n in names if n in drop} if drop else set()
+
     skip = {n for n in names if n in JUNK_NAMES or n.endswith(".log")}
     # PyInstaller 偶尔在 COLLECT 阶段留下 tmpXXXXXXXX 目录
     if Path(directory) == SOURCE:

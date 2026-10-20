@@ -20,8 +20,6 @@ embedding_check.json
 *.log
 charts/
 data-gym-cache/
-# torch 的 inductor 缓存在**构建期**被创建到当前目录（PyInstaller 分析 torch 相关
-# 模块时触发），每次构建都会重新出现 —— 属构建副产物，不是源码。
 torchinductor_*/
 
 # ── 本地向量库 ──
@@ -29,8 +27,6 @@ chroma_db/
 chroma_user_memory/
 
 # ── 运行区（技能结晶档 + 隔离区）──
-# 与 chroma_user_memory/ 同样用**精确名**。注意：精确名规则**不覆盖**带后缀的
-# 目录 —— 备份目录必须另起名字并单独写规则，否则有被误提交的风险（已记录）。
 procedural_memory/
 
 # ── 打包产物 ──
@@ -79,29 +75,15 @@ tests/eval_fixtures/
 workflows/runs/
 
 # ── 测试临时数据目录（COTTON_AGENT_DATA_DIR 隔离用）──
-# 守卫脚本会为每次运行建一个 cotton_test_* 目录来隔离会话与 L4 记忆。
-# ★ 必须忽略：每个目录里的 `.env` 是**真实 .env 的副本（含密钥）**，
-#   提交上去等于把密钥扩散出去。
 cotton_test_*/
-# mkdtemp 在 %TEMP% 不可写时退到 cwd 的产物（本项目机器上 %TEMP% 被安全软件拦截）
 /tmp*/
 # ── 运行期产物 ──
-# 感知分析报告（`/perception` 的输出），运行时生成，不是源码
 /reports/
 
 # ── 凭据与服务商配置 ──
-# 这两个文件是**本地凭据存储**（`core/credentials.py` 与 `core/providers.py` 的落盘目标）。
-# 当前内容是空壳 `{"version":1,"providers":{}}`，但只要用户在界面里填一次 Key，
-# 它们就会含明文密钥 —— 所以一律不进版本控制。
-# 需要示例时看 .env.example。
 credentials.json
 providers.json
 
 # ── 本地诊断脚本 ──
-# 原有规则是 `_probe_*.py`，但实际还有个 `_chunk_probe.py`（切片探针）不匹配。
-# 改成「下划线开头且带 probe」通吃，避免下次又漏。
 _*probe*.py
 
-# ── 评测固定数据的说明 ──
-# tests/eval_fixtures/ 已在上文忽略（17.7 MB，不进仓库）。
-# ⚠️ 代价：克隆仓库的人跑不了需要 fixture 的评测 —— 这是已知取舍。

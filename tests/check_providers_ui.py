@@ -273,6 +273,21 @@ def main() -> int:
         c.check("★★★ 可选项**全部**是登记表里真实存在的模型名（无编造）",
                 not bad_models, f"编造: {bad_models[:5]}")
 
+        _non_chat = getattr(_prov, "NON_CHAT_MODELS", frozenset())
+        c.check("★★ `NON_CHAT_MODELS` 非空（登记表标注了非对话条目）",
+                bool(_non_chat), str(_non_chat))
+        _orphan = [m for m in _non_chat if m not in all_models]
+        c.check("★★ 标注的条目**都在登记表里**（不是凭空写的名单）",
+                not _orphan, f"孤儿: {_orphan}")
+        _leaked = sorted({e.label for e in items} & set(_non_chat))
+        c.check("★★★ 候选表**已过滤**非对话模型（选了只会报错）",
+                not _leaked, f"漏进候选表: {_leaked}")
+        _chat_left = [m for m in (_prov.PROVIDERS["qwen"].models)
+                      if m not in _non_chat]
+        c.check("★★★ 过滤**没有误删**对话模型（反向验证）",
+                [e.label for e in items if e.label in _chat_left],
+                "对话模型被清空了")
+
         first = items[0].label
         win._on_model_selected(first, "qwen")
         c.check("★★★ 选中模型后**同时记住 provider**（否则会打到错误端点）",
