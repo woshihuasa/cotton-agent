@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
-"""校验四个评测数据集：格式、条数、字段完整性 + 数值集与 CSV 对拍"""
+"""校验评测数据集：格式、条数、字段完整性 + 数值集与 CSV 对拍"""
 import io, sys, os, json
 import pandas as pd
 
-ROOT = r"E:\cotton_agent"
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 os.chdir(ROOT)
 sys.path.insert(0, ROOT)
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
@@ -17,6 +17,9 @@ FILES = {
     # 记忆集是异质的（seed / conflict / dedup / retrieval 四种行），
     # 故此处只校验公共字段 type；各类型的专属字段由 eval_memory.py 的装载器把关。
     "memory_set.jsonl": ("type",),
+    # 技能库检索集同样是异质的（seed / retrieve 两种行），故只校验公共字段 type；
+    # 各类型的专属字段（chain / question / expect_any）由 eval_procedural.py 的装载器把关。
+    "procedural_set.jsonl": ("type",),
 }
 ok = True
 data = {}

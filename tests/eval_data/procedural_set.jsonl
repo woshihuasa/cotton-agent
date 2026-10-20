@@ -1,0 +1,25 @@
+{"type": "seed", "note": "技能库种子：7 条工具链路线。**合成数据**，不含任何用户信息（决策 D1：只记路线与参数名，不记参数值与结果）", "entries": [{"chain": ["get_weather"], "arg_shape": {"get_weather": ["location", "date"]}, "triggers": ["天气", "气温", "下雨", "打药", "风力"]}, {"chain": ["query_cotton_stats"], "arg_shape": {"query_cotton_stats": ["region", "year", "metric"]}, "triggers": ["产量", "面积", "亩产", "总产"]}, {"chain": ["calc_price_volatility"], "arg_shape": {"calc_price_volatility": ["start_date", "end_date"]}, "triggers": ["价格", "波动", "涨跌", "行情"]}, {"chain": ["plot_trend"], "arg_shape": {"plot_trend": ["region", "start_year", "end_year"]}, "triggers": ["趋势图", "走势", "画图"]}, {"chain": ["analyze_yield"], "arg_shape": {"analyze_yield": ["region", "target_year", "stat"]}, "triggers": ["预测", "风险", "分级"]}, {"chain": ["web_search"], "arg_shape": {"web_search": ["query"]}, "triggers": ["政策", "补贴", "新闻"]}, {"chain": ["query_cotton_stats", "plot_trend"], "arg_shape": {"query_cotton_stats": ["region", "year"], "plot_trend": ["region", "start_year", "end_year"]}, "triggers": ["对比", "画个图"]}]}
+{"id": 1, "type": "retrieve", "question": "今天阿拉尔天气怎么样", "expect_any": ["get_weather"], "boundary": false, "note": "天气-今天"}
+{"id": 2, "type": "retrieve", "question": "明天阿克苏会下雨吗", "expect_any": ["get_weather"], "boundary": false, "note": "天气-明天"}
+{"id": 3, "type": "retrieve", "question": "阿克苏地区2022年棉花产量是多少", "expect_any": ["query_cotton_stats"], "boundary": false, "note": "单点查询-市级"}
+{"id": 4, "type": "retrieve", "question": "阿克苏2021年的棉花亩产是多少公斤", "expect_any": ["query_cotton_stats"], "boundary": false, "note": "亩产（metric=mu）"}
+{"id": 5, "type": "retrieve", "question": "2022年新疆棉花播种面积", "expect_any": ["query_cotton_stats"], "boundary": false, "note": "面积"}
+{"id": 6, "type": "retrieve", "question": "全区棉花总产是多少", "expect_any": ["query_cotton_stats"], "boundary": false, "note": "总产口径"}
+{"id": 7, "type": "retrieve", "question": "棉花价格指数最近的波动率怎么样", "expect_any": ["calc_price_volatility"], "boundary": false, "note": "价格波动率"}
+{"id": 8, "type": "retrieve", "question": "帮我看看最近的价格涨跌", "expect_any": ["calc_price_volatility"], "boundary": false, "note": "涨跌"}
+{"id": 9, "type": "retrieve", "question": "最近棉花行情如何", "expect_any": ["calc_price_volatility"], "boundary": false, "note": "行情（单标签命中）"}
+{"id": 10, "type": "retrieve", "question": "画一下阿克苏2018到2022年的产量趋势图", "expect_any": ["plot_trend", "query_cotton_stats>plot_trend"], "boundary": false, "note": "产量+趋势图 双标签，绘图类应胜出"}
+{"id": 11, "type": "retrieve", "question": "对比一下喀什和阿克苏2022年的棉花产量，帮我画个图", "expect_any": ["query_cotton_stats>plot_trend"], "boundary": false, "note": "复合意图 → 复合链路（对比+画个图 命中 2）"}
+{"id": 12, "type": "retrieve", "question": "预测一下2027年阿克苏地区的棉花产量", "expect_any": ["analyze_yield"], "boundary": false, "note": "预测（与产量并列，靠新建时间胜出）"}
+{"id": 13, "type": "retrieve", "question": "评估一下各产区产量波动风险", "expect_any": ["analyze_yield"], "boundary": false, "note": "产量/波动/风险 三标签并列"}
+{"id": 14, "type": "retrieve", "question": "做个产量风险分级", "expect_any": ["analyze_yield"], "boundary": false, "note": "风险+分级 命中 2，应稳胜"}
+{"id": 15, "type": "retrieve", "question": "新疆棉花有什么最新的补贴政策", "expect_any": ["web_search"], "boundary": false, "note": "政策+补贴 命中 2"}
+{"id": 16, "type": "retrieve", "question": "查一下最新的棉花新闻", "expect_any": ["web_search"], "boundary": false, "note": "新闻"}
+{"id": 17, "type": "retrieve", "question": "今天阿拉尔适合打药吗", "expect_any": ["get_weather"], "boundary": false, "note": "打药适宜性 → 天气"}
+{"id": 18, "type": "retrieve", "question": "明天风力大不大", "expect_any": ["get_weather"], "boundary": false, "note": "风力"}
+{"id": 19, "type": "retrieve", "question": "价格走势怎么样", "expect_any": ["plot_trend", "calc_price_volatility"], "boundary": false, "note": "价格/走势 并列，两者都算合理"}
+{"id": 20, "type": "retrieve", "question": "棉花价格和产量一起看下", "expect_any": ["calc_price_volatility", "query_cotton_stats"], "boundary": false, "note": "价格/产量 并列，两者都算合理"}
+{"id": 101, "type": "retrieve", "question": "红蜘蛛什么时候全田防治", "expect_any": [], "boundary": true, "note": "已知边界：俗名 vs 学名（棉叶螨），与知识库短板 #21 同类；标签词一个都不含，当前应不命中"}
+{"id": 102, "type": "retrieve", "question": "缩节胺什么时候喷、喷多少", "expect_any": [], "boundary": true, "note": "已知边界：问农事操作但不含任何工具标签词 → 不需要经验提示（模型直接答知识库即可）"}
+{"id": 103, "type": "retrieve", "question": "该不该囤货", "expect_any": [], "boundary": true, "note": "已知边界：口语化决策问题，不含「价格/波动/行情」"}
+{"id": 104, "type": "retrieve", "question": "我家地第一次滴水要滴多少方", "expect_any": [], "boundary": true, "note": "已知边界：灌溉农事，无工具标签词；且「多少方」无数字不产生单位锚点（见模块 docstring）"}

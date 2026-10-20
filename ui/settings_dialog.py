@@ -28,8 +28,10 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
     QPushButton,
     QScrollArea,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -42,6 +44,11 @@ DIALOG_STYLE = """
 QDialog {
     background-color: #FFFFFF;
 }
+/* ── 设置卡片：**只留边框，填充透明** ──
+   ★ 原来只写了 border，没写 background-color，Qt 就用平台默认调色板
+     （实测 `QGroupBox` 的 Window 色是 #efefef），于是每张卡片都是一个
+     **灰色矩形块**，和白色对话框格格不入。
+     这里显式声明透明，让卡片"只剩一个圆角描边"。 */
 QGroupBox {
     font-size: 14px;
     font-weight: 600;
@@ -50,6 +57,7 @@ QGroupBox {
     border-radius: 8px;
     margin-top: 12px;
     padding-top: 16px;
+    background-color: transparent;
 }
 QGroupBox::title {
     subcontrol-origin: margin;
@@ -62,6 +70,7 @@ QLineEdit {
     padding: 8px 32px 8px 10px;
     font-size: 13px;
     color: #333333;
+    background-color: #FFFFFF;
 }
 QLineEdit:focus {
     border-color: #4A90D9;
@@ -73,16 +82,41 @@ QLineEdit:disabled {
 QLabel#formLabel {
     font-size: 13px;
     color: #555555;
+    background: transparent;
 }
 QLabel a {
     color: #0066CC;
     text-decoration: none;
+}
+/* ── 左侧导航（把各设置卡片收进菜单）── */
+QListWidget#settingsNav {
+    background-color: #FAFAFA;
+    border: none;
+    border-right: 1px solid #EEEEEE;
+    outline: none;
+    padding: 8px 6px;
+    font-size: 13px;
+}
+QListWidget#settingsNav::item {
+    color: #444444;
+    padding: 9px 12px;
+    border-radius: 6px;
+    margin: 2px 0;
+}
+QListWidget#settingsNav::item:hover {
+    background-color: #F0F1F3;
+}
+QListWidget#settingsNav::item:selected {
+    background-color: #E9EBEF;
+    color: #111111;
+    font-weight: 600;
 }
 QPushButton {
     padding: 8px 20px;
     border-radius: 6px;
     font-size: 13px;
     font-weight: 500;
+    background: transparent;
 }
 QPushButton#saveBtn {
     background-color: #000000;
@@ -93,15 +127,15 @@ QPushButton#saveBtn:hover {
     background-color: #333333;
 }
 QPushButton#cancelBtn {
-    background-color: #F5F5F5;
+    background-color: transparent;
     color: #333333;
     border: 1px solid #D0D0D0;
 }
 QPushButton#cancelBtn:hover {
-    background-color: #E8E8E8;
+    background-color: #F5F5F5;
 }
 QPushButton#cancelBtn:disabled {
-    background-color: #FAFAFA;
+    background-color: transparent;
     color: #BBBBBB;
     border-color: #E8E8E8;
 }
@@ -262,8 +296,9 @@ class SettingsDialog(QDialog):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("API 设置")
-        self.setMinimumWidth(500)
-        self.setMaximumWidth(600)
+        # ★ 比原来宽：左侧多了 132px 导航栏，宽度不加的话右侧表单会被压扁
+        self.setMinimumWidth(660)
+        self.setMaximumWidth(780)
         self.setModal(True)
         self.setStyleSheet(DIALOG_STYLE)
 
@@ -285,45 +320,56 @@ class SettingsDialog(QDialog):
         height = self.MAX_HEIGHT
         if avail is not None:
             height = max(self.MIN_HEIGHT, min(self.MAX_HEIGHT, int(avail.height() * 0.82)))
-        self.resize(560, height)
+        self.resize(720, height)
 
         if avail is not None:
             frame = self.frameGeometry()
             frame.moveCenter(avail.center())
             self.move(frame.topLeft())
 
+    def _make_page(self, *widgets: QWidget) -> QScrollArea:
+        """把若干卡片包成一个**可滚动的设置页**。
+
+        ★ 每个分类各自滚动：原来只有一个全局滚动区，切了分类还是同一根滚动条，
+          会让人以为"还在同一页"。分开之后每个分类的滚动位置互不干扰。
+        """
+        page = QWidget()
+        page.setObjectName("scrollContent")
+        col = QVBoxLayout(page)
+        col.setSpacing(16)
+        col.setContentsMargins(0, 0, 8, 0)          # 右侧留出滚动条位置
+        for w in widgets:
+            col.addWidget(w)
+        col.addStretch(1)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setWidget(page)
+        return scroll
+
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
         root.setSpacing(12)
-        root.setContentsMargins(20, 20, 20, 16)
+        root.setContentsMargins(0, 0, 0, 0)      # 导航要贴边，外边距交给各块自己
 
-        # ── 可滚动内容区 ──
-        # 所有设置分组放进 content，由 QScrollArea 承载：
-        # 窗口放不下时内容滚动，而不是把对话框撑到屏幕之外。
-        content = QWidget()
-        content.setObjectName("scrollContent")
-        col = QVBoxLayout(content)
-        col.setSpacing(16)
-        col.setContentsMargins(0, 0, 8, 0)      # 右侧留出滚动条位置
+        # ── 主体：左侧导航 | 右侧设置页 ──
+        # ★ 2026-10-18：把原来"一整列往下排"的卡片收进左侧菜单，
+        #   点菜单项只显示对应的一组，右侧不再需要一直滚动找设置项。
+        body = QHBoxLayout()
+        body.setSpacing(0)
+        body.setContentsMargins(0, 0, 0, 0)
 
-        # ── DeepSeek ──
-        ds_group = QGroupBox("DeepSeek API")
-        ds_form = QFormLayout(ds_group)
-        ds_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        self._nav = QListWidget()
+        self._nav.setObjectName("settingsNav")
+        self._nav.setFixedWidth(132)
+        self._nav.setFrameShape(QFrame.Shape.NoFrame)
+        self._nav.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._nav.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
 
-        self._ds_key = PasswordLineEdit()
-        self._ds_key.setPlaceholderText("sk-...")
-        self._ds_key.setMinimumWidth(300)
-        ds_form.addRow(self._label("API Key:"), self._ds_key)
-
-        self._ds_url = QLineEdit()
-        self._ds_url.setPlaceholderText("https://api.deepseek.com")
-        ds_form.addRow(self._label("Base URL:"), self._ds_url)
-
-        self._ds_model = QLineEdit()
-        self._ds_model.setPlaceholderText("deepseek-v4-flash")
-        ds_form.addRow(self._label("Model:"), self._ds_model)
-        col.addWidget(ds_group)
+        self._stack = QStackedWidget()
+        self._stack.setObjectName("settingsStack")
 
         # ── Embedding ──
         emb_group = QGroupBox("Embedding API (硅基流动)")
@@ -341,7 +387,24 @@ class SettingsDialog(QDialog):
         self._emb_model = QLineEdit()
         self._emb_model.setPlaceholderText("BAAI/bge-large-zh-v1.5")
         emb_form.addRow(self._label("Model:"), self._emb_model)
-        col.addWidget(emb_group)
+
+        # ── 模型（多提供商管理，含「测试连接」与「设为默认」）──
+        # ⚠️ 该分组**即时保存**（增删改立刻落盘），不依赖底部的"保存"按钮 ——
+        #    因为密钥写入是独立于 .env 的凭据层，混进 _on_save 会让"取消"语义变复杂。
+        prov_group = QGroupBox("模型")
+        prov_layout = QVBoxLayout(prov_group)
+        prov_layout.setSpacing(8)
+        try:
+            from ui.provider_editor import ProviderGroup
+            self._providers = ProviderGroup()
+            prov_layout.addWidget(self._providers)
+        except Exception as e:                          # noqa: BLE001
+            # 界面降级：提供商页初始化失败**不应让整个设置打不开**
+            err = QLabel(f"模型提供商管理暂不可用：{type(e).__name__}: {e}")
+            err.setWordWrap(True)
+            err.setObjectName("formLabel")
+            prov_layout.addWidget(err)
+            self._providers = None
 
         # ── 其他 API ──
         other_group = QGroupBox("其他 API")
@@ -355,7 +418,6 @@ class SettingsDialog(QDialog):
         self._tavily_key = PasswordLineEdit()
         self._tavily_key.setPlaceholderText("tvly-...")
         other_form.addRow(self._label("Tavily Search Key:"), self._tavily_key)
-        col.addWidget(other_group)
 
         # ── Web 服务 ──
         web_group = QGroupBox("Web 服务（浏览器访问）")
@@ -399,19 +461,34 @@ class SettingsDialog(QDialog):
         self._web_status.setOpenExternalLinks(True)
         web_layout.addWidget(self._web_status)
 
-        col.addWidget(web_group)
-        col.addStretch(1)
+        # ── 装页：顺序即菜单顺序 ──
+        pages = [
+            ("模型", self._make_page(prov_group)),
+            ("Embedding", self._make_page(emb_group)),
+            ("其他 API", self._make_page(other_group)),
+            ("Web 服务", self._make_page(web_group)),
+        ]
+        for title, page in pages:
+            self._nav.addItem(title)
+            self._stack.addWidget(page)
 
-        # ── 滚动容器 ──
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setWidget(content)
-        root.addWidget(scroll, 1)
+        self._nav.currentRowChanged.connect(self._stack.setCurrentIndex)
+        self._nav.setCurrentRow(0)          # 默认停在「模型」——最常改的一项
+
+        # 右侧页面外留一点边距（左导航贴边，右内容不贴边）
+        right_wrap = QWidget()
+        right_lay = QVBoxLayout(right_wrap)
+        right_lay.setContentsMargins(18, 18, 18, 8)
+        right_lay.setSpacing(0)
+        right_lay.addWidget(self._stack)
+
+        body.addWidget(self._nav)
+        body.addWidget(right_wrap, 1)
+        root.addLayout(body, 1)
 
         # ── 按钮（固定在底部，不随内容滚动）──
         btn_layout = QHBoxLayout()
+        btn_layout.setContentsMargins(18, 0, 18, 16)
         btn_layout.addStretch()
 
         cancel_btn = QPushButton("取消")
@@ -436,9 +513,9 @@ class SettingsDialog(QDialog):
 
     def _load_values(self) -> None:
         data = ConfigManager.load()
-        self._ds_key.setText(data.get("DEEPSEEK_API_KEY", ""))
-        self._ds_url.setText(data.get("DEEPSEEK_BASE_URL", ""))
-        self._ds_model.setText(data.get("DEEPSEEK_MODEL", ""))
+        # ⚠️ 这里**不再**加载 DEEPSEEK_* —— 那三个键仍留在 .env 里（作为
+        # `LLM_PROVIDER` 为空时的向后兼容回退），但界面上已经不提供编辑入口：
+        # 提供商与密钥统一在「模型」分组里管理（登记表 + 凭据层）。
         self._emb_key.setText(data.get("EMBEDDING_API_KEY", ""))
         self._emb_url.setText(data.get("EMBEDDING_BASE_URL", ""))
         self._emb_model.setText(data.get("EMBEDDING_MODEL", ""))
@@ -523,10 +600,10 @@ class SettingsDialog(QDialog):
         self._web_status.setText(self._running_html(local, lan))
 
     def _on_save(self) -> None:
+        # ⚠️ **不再写入 DEEPSEEK_\*** —— 模型接入已交给「模型」分组
+        # （登记表 + 凭据层 + `LLM_PROVIDER`）。这里若继续写那三个键，
+        # 会出现"界面上没有入口、却在每次保存时被覆盖"的隐性副作用。
         ConfigManager.save({
-            "DEEPSEEK_API_KEY": self._ds_key.text().strip(),
-            "DEEPSEEK_BASE_URL": self._ds_url.text().strip() or "https://api.deepseek.com",
-            "DEEPSEEK_MODEL": self._ds_model.text().strip() or "deepseek-v4-flash",
             "EMBEDDING_API_KEY": self._emb_key.text().strip(),
             "EMBEDDING_BASE_URL": self._emb_url.text().strip() or "https://api.siliconflow.cn/v1",
             "EMBEDDING_MODEL": self._emb_model.text().strip() or "BAAI/bge-large-zh-v1.5",

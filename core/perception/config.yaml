@@ -1,0 +1,86 @@
+# 感知层推理配置
+# ============================================================
+# 这个文件是「推理规格书」的可执行形态。
+# 论文方法章里的 inference_spec 五个字段，就来自这里。
+# 改这个文件 = 改推理协议，所有实验共用同一份。
+# ============================================================
+
+# ---------- 检测器（黑箱，不训练不修改）----------
+detector:
+  # Ultralytics 权重路径。师兄给的 .pt 文件
+  weights: "path/to/best.pt"
+  # 权重版本号，写进契约的 weights_version 字段
+  # 建议格式：日期或师兄报告的版本标识
+  weights_version: "yolo-cotton-2025H2"
+
+# ---------- 推理协议（★ 论文方法章要写清楚的五个字段）----------
+inference:
+  # 切片边长（像素）。师兄现用 640，保持不动
+  tile_size_px: 640
+  # 切片重叠比例。0.15 = 相邻切片重叠 15%
+  # 目的：避免某个棉絮正好落在切缝上被切一半
+  tile_overlap: 0.15
+  # 模型输入尺寸。与 tile_size 相同 = 不缩放（保持原生分辨率）
+  input_size_px: 640
+  # 置信度阈值
+  # ⚠️ 待填：向师兄要现用值。拿不到先用 0.25 并做敏感性分析
+  conf_threshold: 0.25
+  # NMS IoU 阈值
+  # ⚠️ 待填：这个参数直接决定「系统性少计」的幅度，是关键参数
+  nms_iou: 0.5
+  # 推理设备：0=第一块GPU, cpu=CPU
+  device: "0"
+  # 批大小（切片批量推理，显存不够就调小）
+  batch_size: 16
+
+# ---------- 跨切片去重 ----------
+# 重叠切片会产生重复框（同一棉絮被相邻切片各检一次）
+dedup:
+  # 启用的去重策略：nms / none
+  # nms  = 跨切片再做一次 NMS（简单，推荐先用）
+  # none = 不去重（调试用，看原始重复情况）
+  strategy: "nms"
+  # 跨切片 NMS 的 IoU 阈值（通常比单片内的更严）
+  iou_threshold: 0.5
+
+# ---------- 影像几何（用于「框数 → 密度」换算）----------
+# ★ 这是把 count 变成 density 的关键，没有它就不知道分母
+geometry:
+  # 相机参数：用「水平覆盖系数」建模（不是传感器物理尺寸）
+  # 理由：标称的 17.3mm 是 4/3 系统的对角线，正推会偏差约 1.8 倍
+  #       （面积差约 3 倍）—— 详见 perception/验证状态.md 第三节
+  camera:
+    # 水平地面覆盖 / 飞行高度（无量纲）
+    # Mavic 3 Classic = 1.286（来自研究方向探索.md 第 10.2 节）
+    # ⚠️ Mavic3M / 3T 的系数不同，必须逐机型确认
+    coverage_factor: 1.286
+    # 原生影像尺寸（像素）
+    image_width_px: 5280
+    image_height_px: 3956
+  # 飞行高度（米）。若每块田不同，在田块清单里单独指定
+  # 这里填默认值
+  altitude_m: 5.0
+  # ★ 备选（更可靠）：若你有实测 GSD 记录，直接填这里，优先级高于 coverage_factor
+  # 例：师兄报告写 3-5m 下 GSD 0.096-0.128 cm/px
+  measured_gsd_cm_per_px: null
+
+# ---------- 有效帧判定（valid_frame_ratio 的来源）----------
+quality:
+  # 判定为「无效帧」的规则（★ 必须显式记录，不能静默丢弃）
+  # 过曝：整幅平均亮度超过阈值
+  overexposed_mean_threshold: 240
+  # 欠曝
+  underexposed_mean_threshold: 15
+  # 模糊：拉普拉斯方差低于阈值
+  blur_laplacian_threshold: 50.0
+  # 零检出：检出框数为 0 且幅面正常 → 记为可疑（不等于无效）
+  flag_zero_detection: true
+
+# ---------- 路径 ----------
+paths:
+  # 影像根目录（脚本会递归扫描）
+  image_dir: "path/to/images"
+  # 输出目录
+  output_dir: "./output"
+  # 田块清单（CSV：field_id, image_pattern, altitude_m, field_area_m2）
+  field_manifest: "./fields.csv"

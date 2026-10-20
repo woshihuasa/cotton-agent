@@ -38,11 +38,10 @@ from core.user_memory import UserMemoryStore       # noqa: E402
 FIXTURE_DB = ROOT / "tests" / "eval_fixtures" / "memory" / "db"
 SANDBOX = ROOT / "tests" / "eval_outputs" / "smoke_memory_sandbox"
 
-# 集合名 → 实例属性名（两者不同名，显式映射避免 getattr 猜错）
-COLLECTION_ATTRS = {
-    "user_memory": "_memory_collection",
-    "session_summaries": "_summary_collection",
-}
+# ⚠️ 不再按"集合名 → 私有属性名"映射来清空沙箱：L4 已按**作用域**拆成
+#    `user_profile` / `project_facts` 两个库，库的布局会随拆分变化，
+#    私有属性名不是稳定契约。改为调用 store 的公开 API。
+#    （fixture 仍是单集合布局 → store 走"旧库兼容模式"，同样被这两个 API 覆盖。）
 
 # 测试用事实刻意与棉花无关，避免与 fixture 里的真实记忆语义撞车
 FACT = "用户的测试标记是 ZX-7788"
@@ -83,11 +82,9 @@ def main() -> int:
 
     st = UserMemoryStore(db_path=str(SANDBOX / "chroma_user_memory"))
     print(f"    沙箱载入 fixture: {st.counts()}")
-    for name, attr in COLLECTION_ATTRS.items():
-        col = getattr(st, attr)
-        ids = col.get(include=[]).get("ids") or []
-        if ids:
-            col.delete(ids=ids)
+    n_l4 = st.clear_all_l4()
+    n_l3 = st.clear_all_summaries()
+    print(f"    已清空：L4 {n_l4} 条（跨全部库）· L3 {n_l3} 条")
     check("沙箱已清空", st.counts() == {"user_memory": 0, "session_summaries": 0},
           str(st.counts()))
 

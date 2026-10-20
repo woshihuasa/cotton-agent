@@ -1,0 +1,25 @@
+# P1 验收流程 —— 查统计 CSV → 数值门禁 → 绘图落盘（零 LLM）
+# ★ 这份 YAML 是**权威定义**（决策 3a）：可 diff、可 code review、可被守卫校验。
+# ⚠️ YAML 的注释是 `#`，不是 `//` —— 写错了整份文件会被当成一个字符串。
+id: p1_pipeline
+version: 1
+description: P1 验收流程 —— 查统计 → 数值门禁 → 绘图落盘（零 LLM）
+inputs:
+  region: { type: string, required: true }
+nodes:
+  - id: raw_yield
+    type: tool.query_cotton_stats
+    params: { region: "{{region}}", year: 2021, metric: yield, stat: value }
+    side_effect: none
+
+  - id: check_range
+    type: gate.numeric_consistency
+    params: { sources: [raw_yield], target: "{{raw_yield.value}}" }
+    side_effect: none
+    needs: [raw_yield]
+
+  - id: chart
+    type: tool.plot_trend
+    params: { metric: yield, regions: [阿克苏地区, 喀什地区], start: 2016, end: 2022 }
+    side_effect: disk
+    needs: [check_range]

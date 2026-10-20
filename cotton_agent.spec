@@ -41,6 +41,39 @@ def kb_datas():
     return entries
 
 
+# 手写技能允许分发的文件类型。技能目录**随版本分发**（真相源在 git），
+# 但其中会有人的脚本与说明，故仍走**白名单逐文件收集** —— 与 kb_datas 同一做法
+# （S7-A 的教训：整目录照搬会静默夹带运行时产物）。
+SKILL_SUFFIXES = {".md", ".yaml", ".yml", ".json", ".py", ".sh", ".ps1", ".txt"}
+
+
+def skills_datas():
+    """按白名单收集 skills/ 下的手写技能，返回 PyInstaller 的 (源, 目标目录) 列表。
+
+    运行时这些文件位于 `_MEIPASS/skills/`，由 `config.shipped_skill_dir()` 定位，
+    并作为**只读挂载点**被读取（docs/ARCHITECTURE.md §3.1、§4）。
+    """
+    skills_root = ROOT / "skills"
+    if not skills_root.exists():
+        print("[spec] skills/ 不存在 —— 本次不收录手写技能")
+        return []
+    entries, skipped = [], []
+    for f in sorted(skills_root.rglob("*")):
+        if not f.is_file():
+            continue
+        rel = f.relative_to(skills_root)
+        if f.suffix.lower() in SKILL_SUFFIXES:
+            entries.append((str(f), str(Path("skills") / rel.parent)))
+        else:
+            skipped.append(rel.as_posix())
+    if skipped:
+        print(f"[spec] 已排除 {len(skipped)} 个非技能文件（不随包分发，建议从 skills/ 清理）:")
+        for s in skipped[:20]:
+            print(f"[spec]    skills/{s}")
+    print(f"[spec] 手写技能文件 {len(entries)} 个将随包分发")
+    return entries
+
+
 # 主程序
 a = Analysis(
     [str(ROOT / "main.py")],
@@ -49,6 +82,7 @@ a = Analysis(
     datas=[
         # 只读资产（知识库文档 + Web 页面 + 图标 + 版本号）
         *kb_datas(),
+        *skills_datas(),
         (str(ROOT / "web"), "web"),
         (str(ROOT / "ui" / "icons"), "ui/icons"),
         (str(ROOT / "build_version.txt"), "."),
@@ -73,7 +107,18 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=["PyQt6.QtWebEngineCore", "PyQt6.QtWebEngineWidgets", "tkinter"],
+    excludes=[
+        "PyQt6.QtWebEngineCore", "PyQt6.QtWebEngineWidgets", "tkinter",
+        # ⚠️ v0.3.3：以下大包被 transformers 间接拖入，但项目 RAG/rerank 只用
+        # onnxruntime（不依赖 torch/scipy/sklearn）。hook-torch 在隔离子进程里
+        # 收集 torch.testing._internal.optests 时触发 0xC0000005 段错误，直接
+        # 中断打包；excludes 掉它们，打包从"必崩"变"快速通过"，包体也大幅缩小。
+        "torch", "torchvision", "torchaudio",
+        "transformers",
+        "scipy", "sklearn", "scikit-learn",
+        "sympy",  # torch/scipy 的间接依赖，同样不需要
+        "tensorboard",
+    ],
     noarchive=False,
     optimize=0,
 )
@@ -123,5 +168,6 @@ coll = COLLECT(
     upx=False,
     name="CottonAgent",
 )
+
 
 

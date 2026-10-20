@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"
+     viewBox="0 0 16 16" fill="none">
+  <!-- 菜单勾选标记
+       单色描边、圆头圆角，与项目其它图标（hamburger / plus）同一套画法：
+       描边宽 2、颜色 #1f2328、抗锯齿。
+       ★ 用 SVG 而不是让 Qt 画默认勾：默认标记在不同比例/样式下会被
+         拉伸或裁切（实测出现过"勾被挤出方框"的问题）。 -->
+  <path d="M3.2 8.4 L6.3 11.6 L12.8 4.4"
+        stroke="#1f2328" stroke-width="2"
+        stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

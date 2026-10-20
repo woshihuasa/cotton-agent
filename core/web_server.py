@@ -49,7 +49,7 @@ from pydantic import BaseModel
 from config import AppConfig, resource_path
 from core.rag_engine import RAGEngine
 
-app = FastAPI(title="棉花智能问答助手 · Web", docs_url=None, redoc_url=None)
+app = FastAPI(title="棉花种植决策智能体 · Web", docs_url=None, redoc_url=None)
 
 # ── 会话池 ────────────────────────────────────────────────
 # 每个浏览器会话一个 RAGEngine 实例（引擎内部持有当前会话状态，不能全局共享）。
@@ -186,6 +186,174 @@ def index() -> str:
     if not page.exists():
         return "<h1>缺少 web/index.html</h1>"
     return page.read_text("utf-8")
+
+
+# ── 编排层运行视图（P3 只读）──────────────────────────────
+# ⚠️ 这一组接口**只读**：列定义、列运行、看单次运行。
+#    P4 的编辑接口另开（`POST /api/workflows/{id}`），本组不做写入。
+
+def _project_root() -> Path:
+    """项目根目录 —— 与 `config.py` 用的是同一套定位方式（`__file__` 的父目录）。
+
+    ★ 不用 `cwd`：从别的目录启动服务时 `cwd` 会变，而配置/工作流应该跟着代码走。
+    ⚠️ 第一版这里瞎猜了个 `config.BASE_DIR`，**运行期才炸**（守卫/测试都过了，
+    因为没人 import 到这个函数）。
+    """
+    return Path(__file__).resolve().parent.parent
+
+
+def _workflows_dir() -> Path:
+    """工作流定义目录（`workflows/*.yaml`，YAML 是权威定义 —— 决策 3a）。"""
+    d = _project_root() / "workflows"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+@app.get("/workflow", response_class=HTMLResponse)
+def workflow_page() -> str:
+    """工作流可视化页面（手写 SVG，零构建）。"""
+    page = Path(resource_path("web")) / "workflow.html"
+    if not page.exists():
+        return "<h1>缺少 web/workflow.html</h1>"
+    return page.read_text("utf-8")
+
+
+@app.get("/api/workflows")
+def list_workflows() -> dict:
+    """列出所有工作流定义（含节点与边，供前端布局）。"""
+    from core.orchestration import loader
+
+    out: list[dict] = []
+    for p in sorted(_workflows_dir().glob("*.yaml")):
+        try:
+            wf = loader.load_file(p)
+        except Exception as e:                    # noqa: BLE001
+            # ★ 单个文件坏了不该让整个列表 500 —— 把错误当数据返回
+            out.append({"id": p.stem, "error": f"{type(e).__name__}: {e}"})
+            continue
+        out.append({
+            "id": wf.id,
+            "version": wf.version,
+            "description": wf.description,
+            "nodes": [
+                {"id": n.id, "type": n.type, "needs": list(n.needs),
+                 "side_effect": n.effective_side_effect.value,
+                 "optional": bool(n.optional)}
+                for n in wf.nodes
+            ],
+            "edges": [{"from": a, "to": b} for a, b in wf.edges()],
+        })
+    return {"workflows": out}
+
+
+@app.get("/api/workflows/runs")
+def list_workflow_runs(workflow_id: str = "") -> dict:
+    """列出运行记录（摘要）。"""
+    from core.orchestration import store
+
+    try:
+        return {"runs": store.list_runs(workflow_id)}
+    except Exception as e:                        # noqa: BLE001
+        return {"runs": [], "error": f"{type(e).__name__}: {e}"}
+
+
+@app.get("/api/workflows/runs/{run_id}")
+def get_workflow_run(run_id: str) -> dict:
+    """单次运行的完整状态（节点状态 / 耗时 / 错误）—— 可视化的数据源。"""
+    from core.orchestration import store
+
+    run = store.load_run(run_id)
+    if run is None:
+        return {"error": f"找不到运行 {run_id}"}
+    cp = store.load_checkpoint(run_id)
+    steps = []
+    for nid, s in run.steps.items():
+        steps.append({
+            "node_id": nid,
+            "state": s.state.value,
+            "attempts": s.attempts,
+            "rejects": s.rejects,
+            "started_at": s.started_at,
+            "ended_at": s.ended_at,
+            "error": s.error,
+            # 产出可能很大：只把前 2000 字交给前端
+            "output": str(s.output)[:2000] if s.output is not None else None,
+        })
+    return {
+        "run_id": run.run_id,
+        "workflow_id": run.workflow_id,
+        "state": run.state.value,
+        "started_at": run.started_at,
+        "updated_at": run.updated_at,
+        "steps": steps,
+        "waiting_node": (cp.waiting_node if cp else ""),
+    }
+
+
+class WorkflowSaveRequest(BaseModel):
+    """P4：把前端编辑好的图存回 YAML。"""
+
+    yaml_text: str
+    overwrite: bool = False
+
+
+@app.get("/api/workflows/{workflow_id}/yaml")
+def get_workflow_yaml(workflow_id: str) -> dict:
+    """取原始 YAML 文本（P4 编辑用）。"""
+    p = _workflows_dir() / f"{_safe_wf_id(workflow_id)}.yaml"
+    if not p.is_file():
+        return {"error": f"工作流 {workflow_id} 不存在", "yaml_text": ""}
+    return {"workflow_id": workflow_id, "yaml_text": p.read_text(encoding="utf-8")}
+
+
+@app.post("/api/workflows/{workflow_id}")
+def save_workflow(workflow_id: str, req: WorkflowSaveRequest) -> dict:
+    """保存工作流 YAML（**先校验，再落盘**）。
+
+    ★ 这是"YAML 权威（决策 3a）"的兑现：拖拽的结果**写回 YAML**，
+    于是 `git diff` 能看见、守卫能校验、下次加载走同一条路。
+
+    ★ **校验不过就不写盘** —— 让错误停在编辑阶段，而不是等运行时才炸。
+    也**不允许**前端把 `id` 改成别的（文件名与 `id` 必须一致，否则以后找不到）。
+    """
+    from core.orchestration import loader, validator
+
+    safe = _safe_wf_id(workflow_id)
+    try:
+        wf = loader.load_text(req.yaml_text, source=f"{safe}.yaml")
+    except loader.LoaderError as e:
+        return {"ok": False, "stage": "load", "error": str(e)}
+
+    if safe != workflow_id:
+        return {"ok": False, "stage": "id",
+                "error": f"工作流 id 只能是字母/数字/下划线/短横，收到 {workflow_id!r}"}
+    if wf.id != workflow_id:
+        # `id` 与文件名不一致会让"以后按 id 找文件"失效
+        return {"ok": False, "stage": "id",
+                "error": f"YAML 里的 id ({wf.id!r}) 必须与文件名 ({workflow_id!r}) 一致"}
+
+    issues = validator.validate(wf)
+    errors = [str(i) for i in validator.errors_only(issues)]
+    if errors:
+        return {"ok": False, "stage": "validate",
+                "error": "校验未通过，未写入", "issues": errors}
+
+    p = _workflows_dir() / f"{safe}.yaml"
+    if p.exists() and not req.overwrite:
+        return {"ok": False, "stage": "exists",
+                "error": f"{p.name} 已存在；如需覆盖请带 overwrite=true"}
+    p.write_text(req.yaml_text, encoding="utf-8")
+    return {"ok": True, "path": str(p),
+            "warnings": [str(i) for i in issues if i.level == "warn"]}
+
+
+def _safe_wf_id(workflow_id: str) -> str:
+    """把工作流 id 收敛成安全文件名（**挡住路径穿越**）。"""
+    import re as _re
+    s = _re.sub(r"[^A-Za-z0-9_-]", "-", str(workflow_id or "")).strip("-")
+    if not s or ".." in s:
+        return ""
+    return s[:64]
 
 
 @app.post("/session")

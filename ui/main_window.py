@@ -6,8 +6,11 @@
 
 from PyQt6.QtCore import (
     QEasingCurve,
+    QEvent,
     QPoint,
     QPropertyAnimation,
+    QRectF,
+    QSize,
     QThread,
     QTimer,
     Qt,
@@ -17,6 +20,7 @@ from PyQt6.QtGui import QColor, QFontMetrics, QIcon, QPainter, QPen, QPixmap, QP
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QComboBox,
     QDialog,
     QFileDialog,
     QFrame,
@@ -36,6 +40,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from dataclasses import dataclass
 import re
 import sys
 import logging
@@ -47,6 +52,8 @@ log = logging.getLogger("ui")
 
 from config import AppConfig, resource_path
 from core.config_manager import ConfigManager
+from core.llm_client import (DEFAULT_REASONING_EFFORT,
+                            REASONING_EFFORT_LEVELS)
 from core.kb_builder import plan_sync, rebuild_knowledge_base, sync_knowledge_base, verify_embedding
 from core.knowledge_base import KnowledgeBase
 from core.rag_engine import RAGEngine
@@ -110,6 +117,23 @@ QFrame#aiBubble {
 QLabel#bubbleLabel {
     font-size: 14px;
     color: #1f1f1f;
+}
+/* 报告链接按钮：明确的可点目标（不依赖 QLabel 的链接命中区域） */
+QPushButton#reportLinkBtn {
+    background-color: #EAF3FF;
+    border: 1px solid #B6D6F5;
+    border-radius: 6px;
+    padding: 6px 14px;
+    font-size: 13px;
+    color: #1A73E8;
+    text-align: left;
+}
+QPushButton#reportLinkBtn:hover {
+    background-color: #DCEBFF;
+    border-color: #8AB8E8;
+}
+QPushButton#reportLinkBtn:pressed {
+    background-color: #CFE2FB;
 }
 QLabel#bubbleLabel table {
     border-collapse: collapse;
@@ -199,49 +223,43 @@ QPushButton#submitBtn:disabled {
 """
 
 CONTROL_STYLE = """
-QPushButton#modelBtn {
-    background-color: #F0F0F0;
-    border: 1px solid #F0F0F0;
-    border-radius: 12px;
-    padding: 4px 10px;
-    min-height: 20px;
+/* ── 悬停提示（tooltip）：圆角白底 + 灰边框 ──
+   ★ 默认 Qt tooltip 是直角、系统配色的一块方框，和本界面不搭。
+     这里统一成"白底、浅灰描边、圆角"的小卡片。
+     ⚠️ 只靠 QSS 做不出那个**小尖角箭头**（要自绘 popup），
+        所以这是"无箭头的圆角卡片"版本。 */
+QToolTip {
+    background-color: #FFFFFF;
     color: #333333;
-    font-size: 13px;
-}
-QPushButton#modelBtn:hover {
     border: 1px solid #D0D0D0;
-    background-color: #E8E8E8;
-}
-QPushButton#modelBtn:pressed {
-    background-color: #D8D8D8;
+    border-radius: 8px;
+    padding: 6px 10px;
+    font-size: 12px;
 }
 
-QCheckBox#thinkCheck {
-    spacing: 0px;
-    background-color: #F0F0F0;
-    border: 1px solid #F0F0F0;
+/* ── 模型选择 / 思维链长度：同一种"胶囊"外观 ──
+   ★ 2026-10-18 统一两条规则：
+     · **平时**：背景透明、边框透明 —— 不占视觉重量，像纯文字；
+     · **悬停/按下**：只出现底色，**边框颜色与底色完全相同** → 边框实际上看不见。
+   这样两个控件在任何状态下都不会出现"描边"，视觉上是一致的。 */
+QPushButton#modelBtn, QPushButton#effortBtn {
+    background-color: transparent;
+    border: 1px solid transparent;
     border-radius: 12px;
     padding: 4px 10px;
     min-height: 20px;
     color: #333333;
     font-size: 13px;
 }
-QCheckBox#thinkCheck::indicator {
-    width: 0px;
-    height: 0px;
-    image: none;
+QPushButton#modelBtn:hover, QPushButton#effortBtn:hover {
+    background-color: #F0F0F0;
+    border: 1px solid #F0F0F0;      /* 与底色同色 → 看不出描边 */
 }
-QCheckBox#thinkCheck:checked {
-    background-color: #E6F0FF;
-    border: 1px solid #E6F0FF;
-    color: #0066CC;
+QPushButton#modelBtn:pressed, QPushButton#effortBtn:pressed {
+    background-color: #E4E4E4;
+    border: 1px solid #E4E4E4;
 }
-QCheckBox#thinkCheck:hover {
-    border: 1px solid #D0D0D0;
-}
-QCheckBox#thinkCheck:checked:hover {
-    border: 1px solid #B0D8FF;
-}
+
 """
 
 TOGGLE_BTN_STYLE = """
@@ -259,7 +277,325 @@ QPushButton#toggleBtn:hover {
 }
 """
 
-# ── SVG 箭头图标绘制 ───────────────────────────────────────
+# ── 思维链长度四档 ─────────────────────────────────────────
+#
+# ★ 界面档位与"发给接口的取值"**不是同一套字**：
+#   实测 `reasoning_effort="off"` 会 400（`invalid_parameter_error`），
+#   真正表示"关闭思考"的是 `none`。映射表在 `core/llm_client.py`（有守卫）。
+#
+# ★ 默认 **High**（2026-10-18 按用户要求）：默认给足思考深度。
+#   但 `stream_response` 的参数默认值仍是 None —— 这样标题/摘要等
+#   **内部维护**调用不会被顺带加价。
+_EFFORT_LABELS: dict[str, str] = {
+    "off": "Off",
+    "low": "Low",
+    "high": "High",
+    "max": "Max",
+}
+
+#: 模型选择 / 思维链长度**共用**的菜单样式。
+#:
+#: ★ 勾选标记（✔）排版的坑：原先靠"在文字前加 4 个空格"做缩进，
+#:   结果和菜单**自带的勾选列**叠加，把 ✔ 挤成一小团（用户反馈"被压缩"）。
+#:   正确做法是**文字不带前导空格**，由下面这条 `QMenu::indicator` 明确给出
+#:   勾选列宽度，`QMenu::item` 用 padding-left 让文字对齐到勾选列之后。
+@dataclass(frozen=True)
+class PickerEntry:
+    """下拉候选表里的**一行**。
+
+    ★ 为什么把菜单内容抽成**纯数据**：
+      · 原来的实现直接往 `QMenu` 里 `addAction`，于是"内容"和"控件"绑死，
+        守卫只能去翻 `menu.actions()`，既难读也测不了滚动；
+      · 抽成数据后，守卫可以直接断言"列了哪些、谁不可点、谁打勾"，
+        **完全不碰 Qt 事件循环**。
+    """
+
+    kind: str                      #: "sep" 分隔线 / "header" 分组标题 / "item" 可选项
+    label: str = ""
+    data: object = None            #: 选中后回调携带的值
+    checked: bool = False
+
+
+def _picker_popup_qss() -> str:
+    """下拉浮层的样式（白底 + 圆角 + 细边框）。"""
+    return """
+    /* 底色与圆角由 paintEvent 自绘；这里只兜底设透明，
+       避免 QSS 再把整块矩形涂一遍（会盖住圆角）。 */
+    QFrame#pickerPopup {
+        background-color: transparent;
+        border: none;
+    }
+    QScrollArea { background: transparent; border: none; }
+    QWidget#pickerBody { background: transparent; }
+    /* 滚动条：细、无按钮、圆角 */
+    QScrollBar:vertical {
+        background: transparent; width: 8px; margin: 2px 0 2px 0;
+    }
+    QScrollBar::handle:vertical {
+        background: #D4D8DE; border-radius: 4px; min-height: 28px;
+    }
+    QScrollBar::handle:vertical:hover { background: #BFC5CD; }
+    QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+    QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+        background: transparent;
+    }
+    /* 可选项：像菜单项一样，悬停出浅灰底 */
+    QPushButton#pickerItem {
+        border: none;
+        border-radius: 6px;
+        background: transparent;
+        color: #1f2328;
+        font-size: 13px;
+        text-align: left;
+        padding: 6px 12px 6px 34px;
+    }
+    QPushButton#pickerItem:hover { background-color: #F2F3F5; }
+    /* 分组标题：深灰、小字、不可点 */
+    QLabel#pickerHeader {
+        color: #8a919b;
+        font-size: 11px;
+        padding: 8px 10px 2px 12px;
+        background: transparent;
+    }
+    QFrame#pickerSep { background: #F0F0F0; max-height: 1px; min-height: 1px; }
+    """
+
+
+class PickerPopup(QFrame):
+    """**可滚动**的下拉候选浮层。
+
+    【为什么不用 QMenu】
+      `QMenu` 内容变长时会**把菜单撑出屏幕**，而且**不支持滚动**
+      （没有滚动条、滚轮也不起作用）—— 千问一个服务商就有 20 个模型，
+      再加 DeepSeek 就是二十多行，一屏根本放不下。
+
+    【做法】
+      `QFrame`（`Qt.Popup`，点外面自动关）+ 内部 `QScrollArea`。
+      · 高度**按行数封顶**（默认约 8 行），超出的靠**滚轮 / 拖滚动条**看；
+      · 每行是一个 `QPushButton`（悬停有底色），分组标题是不可点的 `QLabel`；
+      · 打勾的行在左侧显示 SVG 勾（`ui/icons/check.svg`）。
+    """
+
+    ROW_H = 30          #: 可选项行高
+    HEADER_H = 26       #: 分组标题行高
+    SEP_H = 9           #: 分隔线行高
+    PAD = 8             #: 上下内边距之和
+
+    #: 底色 / 边框 —— **写死在这里**，不吃系统调色板
+    BG = "#FFFFFF"
+    BORDER = "#E3E5E8"
+
+    #: 圆角半径。★ 因为本控件是**子控件**（不是顶层窗口），圆角不需要
+    #: 窗口 alpha —— 四角露出的是父窗口自己的背景，所以能安全地圆角。
+    RADIUS = 8
+
+    def __init__(self, entries: list[PickerEntry], *, max_visible: int = 8,
+                 parent: QWidget | None = None) -> None:
+        # ★★ 关键：这是**主窗口里的普通子控件**，不是顶层窗口。
+        #
+        #   为什么不用 `Qt.WindowType.Popup` 顶层窗口：圆角需要窗口四角透明，
+        #   而顶层窗口的透明依赖桌面合成器（DWM）给 alpha 通道。实测在部分
+        #   Windows 环境下拿不到，**圆角外会渲染成黑块**。
+        #
+        #   作为子控件就完全没有这个问题：四角不需要 alpha，露出的是**父窗口
+        #   自己的背景**（白色），所以圆角看起来是对的。
+        #
+        #   代价：`Qt.Popup` 的"点外面自动关闭"没有了，需要自己实现
+        #   （见 `eventFilter` 与 `popup_at`）。
+        super().__init__(parent)
+        self.setObjectName("pickerPopup")
+        # 让 QSS 的 background 真正绘制（普通 QWidget/QFrame 子类需要这个标志）
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setStyleSheet(_picker_popup_qss())
+
+        self._on_pick = None
+        self._max_visible = max(1, int(max_visible))
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(1, 1, 1, 1)     # 让 1px 边框露出来
+        outer.setSpacing(0)
+
+        self._scroll = QScrollArea(self)
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        outer.addWidget(self._scroll)
+
+        body = QWidget()
+        body.setObjectName("pickerBody")
+        self._body_layout = QVBoxLayout(body)
+        self._body_layout.setContentsMargins(4, 4, 4, 4)
+        self._body_layout.setSpacing(0)
+        self._scroll.setWidget(body)
+
+        content_h = 8        # 上下 margin
+        check_icon = QIcon(str(resource_path("ui/icons/check.svg")))
+        row_count = 0
+
+        for e in entries:
+            if e.kind == "sep":
+                line = QFrame()
+                line.setObjectName("pickerSep")
+                line.setFixedHeight(1)
+                self._body_layout.addSpacing(self.SEP_H // 2)
+                self._body_layout.addWidget(line)
+                self._body_layout.addSpacing(self.SEP_H // 2)
+                content_h += self.SEP_H
+            elif e.kind == "header":
+                lbl = QLabel(e.label)
+                lbl.setObjectName("pickerHeader")
+                self._body_layout.addWidget(lbl)
+                content_h += self.HEADER_H
+            else:
+                btn = QPushButton(e.label)
+                btn.setObjectName("pickerItem")
+                btn.setCursor(Qt.CursorShape.PointingHandCursor)
+                btn.setFixedHeight(self.ROW_H)
+                btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+                if e.checked and not check_icon.isNull():
+                    btn.setIcon(check_icon)
+                    btn.setIconSize(QSize(16, 16))
+                btn.clicked.connect(
+                    lambda _checked=False, data=e.data: self._pick(data))
+                self._body_layout.addWidget(btn)
+                content_h += self.ROW_H
+                row_count += 1
+
+        self._body_layout.addStretch(1)
+
+        # ★★ 给内容页一个**最小高度**，等于内容真实高度。
+        #   否则在"控件尚未被布局（父窗口未 show）"时，
+        #   `QScrollArea` 只给 body 一个 100x30 的默认尺寸，
+        #   **滚动条范围算出来是 0** —— 看着能滚，实际滚不动。
+        #   实测：未 show 时 body=100x30、sb.max=0；show 之后才对。
+        body.setMinimumHeight(content_h)
+
+        # 高度：不超过 max_visible 行，也不超过内容实际高度
+        cap = self.PAD + self.ROW_H * self._max_visible
+        visible_h = min(content_h, cap)
+        self._scroll.setFixedHeight(max(visible_h, self.ROW_H))
+
+        # 宽度按最长文字粗估，够用即可（避免过宽遮挡聊天区）
+        widest = max((len(e.label) for e in entries if e.label), default=8)
+        width = min(max(180, widest * 9 + 90), 420)
+        # ★ **宽和高都钉死**，而不是只钉宽：
+        #   之前只 `setFixedWidth`，高度交给布局在 `adjustSize()` 时算。
+        #   于是"父窗口还没 show()"时算出来的高度会塌掉 ——
+        #   实测守卫里（窗口未显示）滚动条范围变成 0，而手动 show 后又是 441。
+        #   尺寸自己定死，就不存在这个依赖。
+        self.setFixedSize(width, visible_h + 2)      # +2 给上下 1px 边框
+        self._item_rows = row_count
+
+    # ---- 绘制 ----
+
+    def paintEvent(self, ev) -> None:                        # noqa: N802
+        """**自己画**圆角白底与边框。
+
+        ★★ 为什么必须自绘（这是一个花了很久才定位的坑）：
+          本控件是 `Qt.Popup` 顶层窗口 + `WA_TranslucentBackground`。
+          这个属性在**关掉系统背景绘制**的同时，也让
+          `QFrame#pickerPopup { background-color: #FFFFFF }` 这条 QSS **静默失效**
+          （不报错、不告警，就是不画）。
+
+          实测证据：在深色应用调色板下采样渲染像素，
+          **整张图 0% 是白色**，四角与空白处的像素是 `#000000` 且 **alpha=0** ——
+          即完全透明。透明窗口叠在深色桌面上，看起来就是"黑底 + 灰字"，
+          也就是用户报告的"颜色反了"。
+
+          所以这里手动 `fillPath` 一个圆角矩形，颜色与边框都写死，
+          **不依赖调色板、不依赖 QSS 的 background**。
+        """
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        path = QPainterPath()
+        path.addRoundedRect(rect, float(self.RADIUS), float(self.RADIUS))
+
+        painter.fillPath(path, QColor(self.BG))
+        painter.setPen(QPen(QColor(self.BORDER), 1.0))
+        painter.drawPath(path)
+        painter.end()
+
+    # ---- 交互 ----
+
+    def set_pick_handler(self, fn) -> None:
+        self._on_pick = fn
+
+    def _pick(self, data) -> None:
+        self.close()
+        if self._on_pick is not None:
+            self._on_pick(data)
+
+    def popup_at(self, anchor: QWidget) -> None:
+        """把浮层放到 `anchor` **上方或下方**（父控件坐标系）。
+
+        ★ 与"窗口版"的区别：这里算的是**父控件内部坐标**，不是全局坐标 ——
+          因为本控件是主窗口里的子控件，不是独立窗口。
+        ★ 弹出方向：下方空间不够就**朝上翻**（输入区在窗口底部，几乎总是朝上）。
+        """
+        parent = self.parentWidget() or anchor.window()
+        # ★ 不调 `adjustSize()`：尺寸在 `__init__` 里已 `setFixedSize` 钉死，
+        #   再 adjust 一次反而会被"父窗口未显示"时的空 sizeHint 覆盖掉。
+        w, h = self.width(), self.height()
+        # anchor 左上角换算到父坐标系
+        top_left = anchor.mapTo(parent, QPoint(0, 0))
+        pw, ph = parent.width(), parent.height()
+
+        x = top_left.x()
+        x = max(4, min(x, pw - w - 4))          # 左右夹紧，别出窗口
+
+        below = top_left.y() + anchor.height() + 4
+        above = top_left.y() - h - 4
+        # 下方放得下就往下，否则往上；两边都不够时选空间大的那边
+        if below + h <= ph - 4:
+            y = below
+        elif above >= 4:
+            y = above
+        else:
+            y = max(4, min(below, ph - h - 4))
+
+        self.move(x, y)
+        self.raise_()                            # 盖在聊天区/输入框之上
+        self.show()
+
+        # 「点外面关闭」：子控件没有 Qt.Popup 的自动关闭，这里用应用级事件过滤器补上
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
+
+    def eventFilter(self, obj, ev) -> bool:      # noqa: N802
+        """点浮层以外的地方 / 按 Esc → 关闭。"""
+        if not self.isVisible():
+            return False
+        etype = ev.type()
+        if etype == QEvent.Type.MouseButtonPress:
+            pos = ev.globalPosition().toPoint() if hasattr(
+                ev, "globalPosition") else ev.globalPos()
+            if not self.rect().contains(self.mapFromGlobal(pos)):
+                self.close()
+        elif etype == QEvent.Type.KeyPress and ev.key() == Qt.Key.Key_Escape:
+            self.close()
+        return False
+
+    def hideEvent(self, ev) -> None:             # noqa: N802
+        """隐藏时摘掉事件过滤器，避免越积越多。"""
+        app = QApplication.instance()
+        if app is not None:
+            app.removeEventFilter(self)
+        super().hideEvent(ev)
+
+    #: 供测试读取（可见行数上限 / 实际可选项数）
+    @property
+    def max_visible(self) -> int:
+        return self._max_visible
+
+    @property
+    def item_rows(self) -> int:
+        return self._item_rows
 
 
 def _make_arrow_icon() -> QIcon:
@@ -476,6 +812,14 @@ class MessageBubble(QWidget):
     置于回答气泡上方，与气泡共用同一宽度约束。
     """
 
+    #: 气泡里的链接被点击（参数是 href 原文）。
+    #:
+    #: ★ 为什么不直接用 `QLabel.setOpenExternalLinks(True)`：
+    #   那会把 href **原样**交给系统打开 —— 而 href 来自模型输出，
+    #   模型完全可能写出 `file:///C:/Windows/System32/...`。
+    #   所以这里只**转出信号**，由 `MainWindow` 做**白名单校验**后再决定是否打开。
+    link_clicked = pyqtSignal(str)
+
     _freeze_layout: bool = False  # 布局冻结开关，动画期间阻止 resize 重算
 
     def __init__(self, text: str, is_user: bool, parent: QWidget | None = None) -> None:
@@ -488,9 +832,12 @@ class MessageBubble(QWidget):
         self._label.setWordWrap(True)
         self._label.setTextFormat(Qt.TextFormat.RichText)
         if not is_user:
-            self._label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            self._label.setTextInteractionFlags(
+                self._link_flags())
         else:
             self._label.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
+        # ★ 把 QLabel 的 linkActivated 转成气泡自己的信号（外部做白名单校验）
+        self._label.linkActivated.connect(self.link_clicked)
         self._label.setSizePolicy(
             QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred
         )
@@ -581,10 +928,24 @@ class MessageBubble(QWidget):
             raw = self._label.text()
             if raw:
                 raw = self._render_images(raw)
+                # ★ 报告链接 → 真按钮（比 Markdown 链接可靠）
+                raw = self._render_report_links(raw)
                 # 将剩余的 Markdown 文本转为 HTML 重新渲染
                 html = self._render_markdown(raw)
                 self._label.setText(html)
-            self._label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            # ★ 结束后要**允许点链接**（否则 Markdown 渲染出的 <a> 点不动）
+            self._label.setTextInteractionFlags(self._link_flags())
+
+    @staticmethod
+    def _link_flags() -> Qt.TextInteractionFlag:
+        """可划词 **+ 可点链接** 的交互标志。
+
+        ★ 缺一不可：只给 `TextSelectableByMouse` 时，`<a href>` 会被渲染成
+          普通彩色文字 —— **点了没反应**，而且不会报任何错。
+        """
+        return (Qt.TextInteractionFlag.TextSelectableByMouse
+                | Qt.TextInteractionFlag.LinksAccessibleByMouse)
+
 
     @staticmethod
     def _render_markdown(text: str) -> str:
@@ -605,6 +966,37 @@ class MessageBubble(QWidget):
             if path not in self._rendered_images:
                 self._rendered_images.add(path)
                 self._append_image(path)
+        return pattern.sub("", raw_text)
+
+    def _render_report_links(self, raw_text: str) -> str:
+        """把 `[📄 打开报告](路径)` 渲染成**真按钮**，返回移除该标记后的文本。
+
+        ★ 为什么不依赖 Markdown 链接（`<a href>`）：
+          QLabel 的链接需要**精确命中锚文本**才触发 `linkActivated`，
+          实测在真实界面上很容易"点了没反应"，且没有任何视觉反馈
+          （光标形状、下划线都取决于 QSS）。
+          一个 `QPushButton` 是**明确的可点目标**，且点击必然触发 ——
+          对"用户要把报告打开"这件事，可靠性比样式重要。
+
+        ★ 仍然走同一个白名单：按钮只把 href 交给 `link_clicked`，
+          由 `MainWindow._on_link_clicked()` 校验后再打开。
+        """
+        pattern = re.compile(r"\[([^\]]*打开报告[^\]]*)\]\(([^)]+)\)")
+        found = list(pattern.finditer(raw_text))
+        for m in found:
+            label = (m.group(1) or "打开报告").strip()
+            href = m.group(2).strip()
+            btn = QPushButton(f"📄 {label}" if "📄" not in label else label)
+            btn.setObjectName("reportLinkBtn")
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            btn.setToolTip(href)
+            # ★ 用默认参数绑定 href，避免闭包晚绑定
+            btn.clicked.connect(lambda _=False, h=href: self.link_clicked.emit(h))
+            self._image_labels.append(btn)
+            self._bubble.layout().addWidget(btn)
+            self._bubble.adjustSize()
+            self.updateGeometry()
         return pattern.sub("", raw_text)
 
     def _append_image(self, path: str) -> None:
@@ -800,6 +1192,8 @@ class RAGWorker(QThread):
     """后台流式工作线程。"""
     new_text_signal = pyqtSignal(str, str)
     finished_signal = pyqtSignal()
+    #: ★ 本轮 token 用量（回答结束后发一次）—— 供输入框下方显示缓存命中率
+    usage_signal = pyqtSignal(dict)
 
     def __init__(
         self,
@@ -807,12 +1201,16 @@ class RAGWorker(QThread):
         question: str,
         model_name: str | None = None,
         enable_thinking: bool = False,
+        provider: str | None = None,
+        reasoning_effort: str | None = None,
     ) -> None:
         super().__init__()
         self._engine = engine
         self._question = question
         self._model_name = model_name
         self._enable_thinking = enable_thinking
+        self._provider = provider
+        self._reasoning_effort = reasoning_effort
 
     def run(self) -> None:
         try:
@@ -820,12 +1218,29 @@ class RAGWorker(QThread):
                 self._question,
                 model_name=self._model_name,
                 enable_thinking=self._enable_thinking,
+                provider=self._provider,
+                reasoning_effort=self._reasoning_effort,
             ):
                 self.new_text_signal.emit(msg_type, chunk)
         except Exception as e:
             self.new_text_signal.emit("content", f"❌ 处理失败：{e}")
             self.new_text_signal.emit("error", "")
         finally:
+            # 先把用量发出去，再报"结束" —— 顺序反了的话界面收到结束时还没数据
+            try:
+                u = getattr(self._engine.llm, "last_usage", None)
+                if u is not None:
+                    self.usage_signal.emit({
+                        # ★ 刻意**同时**给出原始字段：`cache_hit_rate` 在"无数据"时
+                        # 也返回 0.0，光看比率**分不清"没数据"和"真的 0%"**
+                        "hit": int(getattr(u, "cache_hit_tokens", 0) or 0),
+                        "miss": int(getattr(u, "cache_miss_tokens", 0) or 0),
+                        "prompt": int(getattr(u, "prompt_tokens", 0) or 0),
+                        "cache_hit_rate": float(getattr(u, "cache_hit_rate", 0.0) or 0.0),
+                        "model": str(getattr(self._engine.llm, "_model", "") or ""),
+                    })
+            except Exception:                                # noqa: BLE001
+                pass                                         # 用量统计绝不该影响回答
             self.finished_signal.emit()
 
 
@@ -833,7 +1248,7 @@ class RAGWorker(QThread):
 
 
 class CottonAgentWindow(QMainWindow):
-    """新疆棉花智能助手主窗口 (v2 - 多会话侧边栏)。
+    """棉花种植决策智能体主窗口 (v2 - 多会话侧边栏)。
 
     布局：左 SideBar | 右 (聊天区 + 输入框)
     """
@@ -908,13 +1323,13 @@ class CottonAgentWindow(QMainWindow):
 
         if mode == "incremental":
             changed = plan["added"] + plan["updated"] + plan["removed"]
-            self.statusBar().showMessage(f"正在更新知识库（{changed} 篇内容变化）…")
+            self._set_status(f"正在更新知识库（{changed} 篇内容变化）…")
             log.info("检测到文档变化，启动增量同步：%s", plan)
         elif plan.get("reason") == "首次建立":
-            self.statusBar().showMessage("正在准备知识库（首次使用，约需 1 分钟）…")
+            self._set_status("正在准备知识库（首次使用，约需 1 分钟）…")
             log.info("首次建立知识库：%s", plan)
         else:
-            self.statusBar().showMessage("正在升级知识库（本次更新包含检索模型变更）…")
+            self._set_status("正在升级知识库（本次更新包含检索模型变更）…")
             log.info("嵌入模型变更，启动全量重建：%s", plan)
 
         self._kb_worker = KbSyncWorker()
@@ -931,11 +1346,11 @@ class CottonAgentWindow(QMainWindow):
                 log.warning("刷新知识库失败: %s", e)
             print(f"[KB] {msg}")
             log.info("知识库处理完成：%s", msg)
-            self.statusBar().showMessage(msg)      # 完成后消息常驻，便于用户确认结果
+            self._set_status(msg)      # 完成后消息常驻，便于用户确认结果
         else:
             print(f"[KB] {msg}")
             log.warning("知识库处理失败：%s", msg)
-            self.statusBar().showMessage("知识库更新失败（不影响其他功能）")
+            self._set_status("知识库更新失败（不影响其他功能）")
             QMessageBox.warning(
                 self,
                 "知识库更新失败",
@@ -1036,9 +1451,20 @@ class CottonAgentWindow(QMainWindow):
 
     # ── UI 构建 ──────────────────────────────────────────
 
+    def _set_status(self, msg: str) -> None:
+        """设置底栏左侧的常驻信息（知识库维护进度等）。
+
+        ★ 替代原来的 `self.statusBar().showMessage(...)`。
+          把它从 `QMainWindow.statusBar()` 搬进聊天容器内部，是为了
+          ① 侧边栏能顶到窗口底部；② 不与右侧缓存命中抢位置；③ 去掉那条分割线。
+        """
+        lbl = getattr(self, "_status_msg", None)
+        if lbl is not None:
+            lbl.setText(msg or "")
+
     def _init_ui(self) -> None:
         """构建整体布局：侧边栏 | 聊天区。"""
-        self.setWindowTitle("棉花智能助手")
+        self.setWindowTitle("棉花种植决策智能体")
         self.resize(900, 600)
         self.setMinimumSize(600, 400)
 
@@ -1105,6 +1531,41 @@ class CottonAgentWindow(QMainWindow):
         self._input_frame.setFixedHeight(100)
         chat_layout.addWidget(self._input_frame)
 
+        # ── 底栏：知识库维护信息（左）+ 缓存命中（右），**同一个容器** ──
+        #
+        # ★ 2026-10-18 第二次改造，三件事一起解决：
+        #
+        #   ① 原来用 `QMainWindow.statusBar()`，它是**横跨整个窗口**的独立控件，
+        #      于是侧边栏被压在它上方、**够不到窗口底部**（用户反馈）。
+        #   ② 缓存命中作为 permanent widget 钉在右侧，与 `showMessage()` 的临时消息
+        #      **抢同一块地方**，知识库维护信息被挤掉（用户反馈"被遮住"）。
+        #   ③ 状态栏自带一条上边框分割线，视觉上把窗口切成两截。
+        #
+        # 所以不再用 `QMainWindow.statusBar()`，改在**聊天容器内部**放一行：
+        #   · 它只占右侧聊天区，**侧边栏因此能顶到窗口底部**；
+        #   · 左右各一个 QLabel，**永不互相遮挡**；
+        #   · 无边框、无背景，视觉上是聊天区的自然收尾。
+        status_row = QHBoxLayout()
+        status_row.setContentsMargins(8, 0, 6, 2)
+        status_row.setSpacing(10)
+
+        self._status_msg = QLabel("")
+        self._status_msg.setObjectName("statusMsg")
+        self._status_msg.setStyleSheet(
+            "color:#8a919b; font-size:11px; background:transparent;")
+        status_row.addWidget(self._status_msg, 1)
+
+        # 显示原则不变：**"没有数据"和"数据是零"必须区分** ——
+        # 初始就显示「缓存命中 —」，而不是留空（留空会让人以为坏了）。
+        self._status_cache = QLabel("缓存命中 —")
+        self._status_cache.setObjectName("statusCache")
+        self._status_cache.setStyleSheet(
+            "color:#8a919b; font-size:11px; background:transparent;")
+        self._status_cache.setToolTip("上一轮问答的提示词缓存命中情况")
+        status_row.addWidget(self._status_cache, 0)
+
+        chat_layout.addLayout(status_row)
+
         frame_layout = QVBoxLayout(self._input_frame)
         frame_layout.setContentsMargins(4, 4, 4, 6)
         frame_layout.setSpacing(0)
@@ -1118,21 +1579,56 @@ class CottonAgentWindow(QMainWindow):
         input_toolbar = QHBoxLayout()
         input_toolbar.setContentsMargins(6, 2, 6, 2)
 
-        self._model_btn = QPushButton("deepseek-v4-flash")
+        # ── 初始模型：从服务商登记表读，**不再写死 deepseek-v4-flash** ──
+        # ★ `_provider_name` 刻意**留空**：空表示"用引擎自己的客户端"。
+        #   只有这样，web 模式下用户自带的 API key 才不会被我在这里
+        #   换成服务器凭据层里的 key。只有用户**主动从菜单选了**才填它。
+        self._model_name = ""
+        self._provider_name = ""
+        _default_label = "deepseek-v4-flash"
+        try:
+            from core import providers as _prov
+            _pname = _prov.default_provider()
+            if _pname:
+                _spec = _prov.all_specs().get(_pname) or {}
+                _default_label = str(_spec.get("default_model") or _default_label)
+        except Exception:                                    # noqa: BLE001
+            pass
+
+        self._model_btn = QPushButton(_default_label)
         self._model_btn.setObjectName("modelBtn")
-        self._model_btn.setIcon(QIcon(str(resource_path("ui/icons/arrow_down.svg"))))
-        self._model_btn.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+        # ★ 2026-10-18 去掉右侧的小三角：它由 SVG 渲染且 viewBox 是扁的（64x38），
+        #   缩到 16px 后形状不清晰，反而显得粗糙。按钮本身的"可点"感由 hover 底色承担。
         self._model_btn.setStyleSheet(
             self._model_btn.styleSheet() + "text-align: left; padding-left: 12px;"
         )
         self._model_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._model_btn.setToolTip("选择 AI 模型")
+        # ★ 去掉点击后文字周围的**虚线焦点框**。
+        #   顺带一个好处：点它不会把键盘焦点从输入框抢走，可以点完继续打字。
+        self._model_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._model_btn.setStyleSheet(
+            self._model_btn.styleSheet() + "outline: none;")
         self._model_btn.clicked.connect(self._show_model_menu)
         input_toolbar.addWidget(self._model_btn)
         input_toolbar.addSpacing(8)
-        self._think_check = QCheckBox("深度思考")
-        self._think_check.setObjectName("thinkCheck")
-        input_toolbar.addWidget(self._think_check)
+        # ── 思考长度：与「模型选择」**同构**的胶囊按钮 + 菜单 ──
+        # ★ 2026-10-18 第三次改：先试过 QComboBox，但它自带系统下拉箭头与方框，
+        #   怎么套样式都不像模型选择那一颗。所以直接**复用同一套控件组合**
+        #   （QPushButton + QMenu），外观与交互天然一致。
+        # ★ 另一个原因同上次：不传思考参数时服务端**默认仍在思考**，
+        #   所以 "Off" 必须显式发 `reasoning_effort=none` 才算真的关。
+        self._effort_level = DEFAULT_REASONING_EFFORT
+        self._effort_btn = QPushButton(_EFFORT_LABELS[self._effort_level])
+        self._effort_btn.setObjectName("effortBtn")
+        # ★ 同模型按钮：去掉小三角（理由见上）
+        self._effort_btn.setStyleSheet(
+            self._effort_btn.styleSheet() + "text-align: left; padding-left: 12px;")
+        self._effort_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._effort_btn.setToolTip("思维链长度")
+        self._effort_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._effort_btn.clicked.connect(self._show_effort_menu)
+        input_toolbar.addWidget(self._effort_btn)
 
         input_toolbar.addStretch()
 
@@ -1194,9 +1690,106 @@ class CottonAgentWindow(QMainWindow):
     def _add_bubble(self, text: str, is_user: bool) -> MessageBubble:
         """创建气泡并插入到底部弹性空间之前。"""
         bubble = MessageBubble(text, is_user, self._bubble_container)
+        # ★ 气泡里的链接 → 走白名单校验后再打开（见 _on_link_clicked）
+        bubble.link_clicked.connect(self._on_link_clicked)
         idx = self._bubble_layout.count() - 1
         self._bubble_layout.insertWidget(idx, bubble)
         return bubble
+
+    # ── 报告链接：白名单校验后打开 ─────────────────────────
+
+    #: 允许从聊天里打开的**目录**（相对项目根）。
+    #:
+    #: ★ 为什么必须有白名单：气泡里的 href 来自**模型输出**
+    #:   （或我们拼接的路径），而 `QDesktopServices.openUrl` 会把它
+    #:   原样交给系统 —— 模型完全可能写出 `file:///C:/Windows/...`。
+    #:   所以只允许打开**这两个产物目录下**的已知类型文件。
+    _OPENABLE_DIRS: tuple[str, ...] = ("reports", "charts")
+    #: 允许打开的文件类型
+    _OPENABLE_SUFFIXES: tuple[str, ...] = (
+        ".md", ".txt", ".png", ".jpg", ".jpeg", ".csv", ".json")
+
+    def _on_link_clicked(self, href: str) -> None:
+        """处理气泡里的链接点击。**校验不过就什么都不做，并给出原因。**"""
+        target, reason = self._check_openable(href)
+        if target is None:
+            # ★ 把**真实原因**和**解析结果**都摆出来，别让用户猜
+            QMessageBox.warning(
+                self, "无法打开",
+                f"{reason}\n\n"
+                f"你点的链接是：\n{href}")
+            print(f"[Report] ★ 拒绝打开：{reason} | href={href!r}")
+            return
+        from PyQt6.QtCore import QUrl
+        from PyQt6.QtGui import QDesktopServices
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(target))):
+            # ★ 兜底：系统没有 .md 的默认程序时，至少让人能打开所在文件夹。
+            #   "打不开"不能是死路 —— 报告就在那儿，得给用户一个可执行的下一步。
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Icon.Warning)
+            box.setWindowTitle("无法直接打开")
+            box.setText("系统没有能打开这个文件的程序。\n\n" + str(target))
+            folder_btn = box.addButton("打开所在文件夹",
+                                       QMessageBox.ButtonRole.ActionRole)
+            box.addButton("知道了", QMessageBox.ButtonRole.RejectRole)
+            box.exec()
+            if box.clickedButton() is folder_btn:
+                QDesktopServices.openUrl(
+                    QUrl.fromLocalFile(str(target.parent)))
+
+    @classmethod
+    def _resolve_openable(cls, href: str) -> Path | None:
+        """把 href 解析成**允许打开**的绝对路径；不允许则返回 `None`。
+
+        ★ 纯函数（不碰 UI），便于守卫直接测。
+        """
+        return cls._check_openable(href)[0]
+
+    @classmethod
+    def _check_openable(cls, href: str) -> tuple[Path | None, str]:
+        """同 `_resolve_openable`，但**同时返回拒绝原因**。
+
+        ★ 为什么要原因：弹窗原本只说"只允许 reports/charts 下…"，
+          而实际拒绝可能是**文件不存在**、**扩展名不对**或**路径穿越** ——
+          用户看到的提示和真实原因对不上，排查全靠猜。
+        """
+        if not href:
+            return None, "链接为空"
+        raw = str(href).strip()
+        # http(s) 等外部链接**一律不从这里打开**（要开请用户自己复制）
+        if re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", raw):
+            return None, "外部链接（http/https/file 等协议）一律不在应用内打开"
+        p = Path(raw)
+        try:
+            resolved = (p if p.is_absolute() else Path.cwd() / p).resolve()
+        except (OSError, RuntimeError) as e:
+            return None, f"路径无法解析：{e}"
+        if not resolved.is_file():
+            return None, f"文件不存在（可能已被清理）：\n{resolved}"
+        if resolved.suffix.lower() not in cls._OPENABLE_SUFFIXES:
+            return None, (f"文件类型 {resolved.suffix!r} 不在允许列表里："
+                          f"{'、'.join(cls._OPENABLE_SUFFIXES)}")
+        # ★ 必须落在白名单目录**之下**（用 resolve 后的真实路径判断，
+        #   这样 `reports/../../etc` 之类会被挡住）
+        #
+        # ★★ 基准必须是**项目根**而不是 cwd（2026-10-20 修）：
+        #   `RAGEngine._report_dir()` 现在返回项目根下的绝对路径，
+        #   如果这里还用 cwd 作根，从别处启动的应用就会**两边对不上**
+        #   —— 报告写到了项目里，白名单却在 cwd 里找。
+        root = Path(__file__).resolve().parent.parent
+        for d in cls._OPENABLE_DIRS:
+            allowed = (root / d).resolve()
+            try:
+                resolved.relative_to(allowed)
+            except ValueError:
+                continue
+            return resolved, ""
+        return None, (f"不在允许打开的目录下。\n\n"
+                      f"只允许：{' / '.join(cls._OPENABLE_DIRS)}\n"
+                      f"项目根：{root}\n"
+                      f"实际位置：{resolved}\n\n"
+                      f"★ 若这是临时目录，说明产物没有落在项目内 —— "
+                      f"请重启应用后重试。")
 
     def _clear_bubbles(self) -> None:
         """清空所有气泡（保留底部 spacer）。"""
@@ -1317,44 +1910,129 @@ class CottonAgentWindow(QMainWindow):
             self._sidebar.set_current_item(self._engine.current_session_id)
             self._load_history()
 
+    # ── 候选表：**纯数据**（便于零成本测试）────────────────
+
+    def _effort_entries(self) -> list[PickerEntry]:
+        """思维链长度的四项候选。"""
+        return [
+            PickerEntry("item", _EFFORT_LABELS[lv], data=lv,
+                        checked=(lv == self._effort_level))
+            for lv in REASONING_EFFORT_LEVELS
+        ]
+
+    def _model_entries(self) -> list[PickerEntry]:
+        """模型候选表 —— 按**已配置密钥的服务商**自动生成。
+
+        【为什么当初要重做】原来是写死的
+        `for model in ["deepseek-v4-flash", "deepseek-v4-pro"]`，
+        配好千问之后下拉框里还是 DeepSeek 的两个模型。
+
+        【结构】每个服务商一段：**分组标题**（不可点）+ 它供应的**模型**（可点）；
+        服务商之间用分隔线隔开。默认服务商排最前。
+        """
+        from core import credentials, providers
+
+        try:
+            specs = providers.all_specs()
+        except Exception as e:                                   # noqa: BLE001
+            specs = {}
+            print(f"[模型候选表] 读取服务商失败：{e}")
+
+        enabled: list[tuple[str, dict]] = []
+        for name, spec in specs.items():
+            try:
+                has = credentials.has_key(name)
+            except Exception:                                    # noqa: BLE001
+                has = False
+            if has:
+                enabled.append((name, spec))
+
+        if not enabled:
+            return [
+                PickerEntry("header", "尚未配置任何服务商密钥"),
+                PickerEntry("item", "去「设置 → 模型」配置", data=("__settings__", "")),
+            ]
+
+        try:
+            cur_prov = providers.default_provider()
+        except Exception:                                        # noqa: BLE001
+            cur_prov = ""
+        enabled.sort(key=lambda kv: (kv[0] != cur_prov, kv[1].get("label", "")))
+
+        entries: list[PickerEntry] = []
+        for idx, (name, spec) in enumerate(enabled):
+            if idx:
+                entries.append(PickerEntry("sep"))
+            entries.append(PickerEntry("header", str(spec.get("label") or name)))
+            models = spec.get("models") or [spec.get("default_model")]
+            for m in models:
+                if not m:
+                    continue
+                entries.append(PickerEntry(
+                    "item", str(m), data=(name, str(m)),
+                    checked=(str(m) == self._model_name
+                             and name == self._provider_name)))
+        return entries
+
+    # ── 弹出 ─────────────────────────────────────────────
+
+    def _show_picker(self, entries: list[PickerEntry], anchor: QWidget,
+                     on_pick, *, max_visible: int = 8) -> PickerPopup:
+        """在 `anchor` 下方弹出候选浮层（超过约 8 行可滚动）。"""
+        # ★ 挂到 `centralWidget()` 而不是 QMainWindow 本身：
+        #   QMainWindow 的被管理布局会忽略直接子控件的几何，浮层会定位错乱。
+        host = self.centralWidget() or self
+        popup = PickerPopup(entries, max_visible=max_visible, parent=host)
+        popup.set_pick_handler(on_pick)
+        popup.popup_at(anchor)
+        return popup
+
+    def _show_effort_menu(self) -> None:
+        """弹出思维链长度候选（四档，不需要滚动，但复用同一套浮层）。"""
+        self._show_picker(self._effort_entries(), self._effort_btn,
+                          self._on_effort_selected, max_visible=4)
+
     def _show_model_menu(self) -> None:
-        menu = QMenu(self)
-        menu.setWindowFlags(
-            menu.windowFlags()
-            | Qt.WindowType.FramelessWindowHint
-            | Qt.WindowType.NoDropShadowWindowHint
-        )
-        menu.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        menu.setStyleSheet("""
-            QMenu {
-                background-color: rgba(255, 255, 255, 0.95);
-                border: 1px solid #FFFFFF;
-                border-radius: 8px;
-                padding: 4px 0px;
-            }
-            QMenu::item {
-                padding: 6px 24px;
-                font-size: 13px;
-                color: #333333;
-                margin: 0px 4px;
-                border-radius: 4px;
-            }
-            QMenu::item:selected {
-                background-color: #F0F0F0;
-                color: #000000;
-            }
-        """)
-        for model in ["deepseek-v4-flash", "deepseek-v4-pro"]:
-            action = menu.addAction(model)
-            action.triggered.connect(
-                lambda checked, m=model: self._on_model_selected(m)
-            )
-        pos = self._model_btn.mapToGlobal(QPoint(0, self._model_btn.height()))
-        menu.exec(pos)
+        """弹出模型候选（服务商分组，超过约 8 行可滚动）。"""
+        self._show_picker(self._model_entries(), self._model_btn,
+                          self._on_model_picked, max_visible=8)
 
-    def _on_model_selected(self, model: str) -> None:
+    def _on_model_picked(self, data) -> None:
+        """候选浮层回调：把 `(provider, model)` 原样交给选中逻辑。"""
+        if not data:
+            return
+        prov, model = data
+        if prov == "__settings__":
+            self._on_settings()
+            return
+        self._on_model_selected(str(model), str(prov))
+
+    def _on_effort_selected(self, level: str) -> None:
+        """选中某档思考长度。"""
+        if level not in _EFFORT_LABELS:
+            return
+        self._effort_level = level
+        self._effort_btn.setText(_EFFORT_LABELS[level])
+
+    def _on_model_selected(self, model: str, provider: str = "") -> None:
+        """选中某个模型 —— **同时记住它属于哪个服务商**。
+
+        ★ 只记模型名是不够的：HTTP 客户端的 base_url / API key 在构造时就定了，
+          所以必须把 provider 一起带到 `ask()`，否则会拿默认服务商的端点
+          去请求另一家的模型名。
+        """
+        self._model_name = model
+        self._provider_name = provider
         self._model_btn.setText(model)
-
+        tooltip = f"{model}"
+        try:
+            from core import providers as _p
+            spec = _p.all_specs().get(provider) or {}
+            if spec.get("label"):
+                tooltip = f"{spec['label']} · {model}"
+        except Exception:                                        # noqa: BLE001
+            pass
+        self._model_btn.setToolTip(tooltip)
     def _on_submit(self) -> None:
         """用户提交问题。"""
         if self._streaming:
@@ -1369,8 +2047,16 @@ class CottonAgentWindow(QMainWindow):
             self._engine.create_session()
             self._refresh_sidebar()
 
-        model_name = self._model_btn.text()
-        enable_thinking = self._think_check.isChecked()
+        model_name = self._model_name or self._model_btn.text()
+        # ★ 思考长度四档：Off/Low/High/Max（Off 会显式发 reasoning_effort=none）
+        # ★ 2026-10-20 修：这里原本读 `_effort_combo.currentData()`，
+        #   但"思维链长度"已从**下拉框**改成**按钮 + 弹层**，
+        #   属性也随之变成 `_effort_level`（等级字符串）。
+        #   漏改的那一处会让**任何输入**都抛 AttributeError ——
+        #   用户在界面上一条消息都发不出去。
+        reasoning_effort = str(self._effort_level or "off")
+        enable_thinking = reasoning_effort != "off"
+        provider = self._provider_name
 
         self._add_bubble(question, is_user=True)
 
@@ -1395,10 +2081,30 @@ class CottonAgentWindow(QMainWindow):
             self._engine, question,
             model_name=model_name,
             enable_thinking=enable_thinking,
+            provider=provider,
+            reasoning_effort=reasoning_effort,
         )
         self._worker.new_text_signal.connect(self._on_update_text)
         self._worker.finished_signal.connect(self._on_stream_finished)
+        self._worker.usage_signal.connect(self._on_usage)
         self._worker.start()
+
+    def _on_usage(self, d: dict) -> None:
+        """更新**底栏**的缓存命中率提示。
+
+        ★ 判"有没有数据"与文案生成都在 `core.prompt_layers.format_cache_hint()` 里 ——
+        那是**纯函数**，能被零成本守卫覆盖；这里只负责贴到 QLabel。
+        """
+        lbl = getattr(self, "_status_cache", None)
+        if lbl is None:
+            return
+        from core.prompt_layers import format_cache_hint
+        text, tip = format_cache_hint(
+            int(d.get("hit", 0) or 0), int(d.get("miss", 0) or 0),
+            model=str(d.get("model") or ""),
+        )
+        lbl.setText(text)
+        lbl.setToolTip(tip)
 
     def _on_update_text(self, msg_type: str, chunk: str) -> None:
         """接收流式 (类型, 片段) —— 分支处理。"""

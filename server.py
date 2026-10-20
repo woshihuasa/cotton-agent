@@ -29,7 +29,7 @@ from core import web_server        # noqa: E402
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="棉花智能问答助手 · Web 服务")
+    ap = argparse.ArgumentParser(description="棉花种植决策智能体 · Web 服务")
     ap.add_argument("--host", default="0.0.0.0",
                     help="监听地址（默认 0.0.0.0，允许局域网访问）")
     ap.add_argument("--port", type=int, default=8000, help="监听端口（默认 8000）")
@@ -37,7 +37,7 @@ def main() -> None:
 
     local, lan = web_server.access_urls(args.port)
     print("=" * 58)
-    print("  棉花智能问答助手 · Web 服务")
+    print("  棉花种植决策智能体 · Web 服务")
     print("=" * 58)
     print(f"  本机访问   ：{local}")
     print(f"  局域网访问 ：{lan}   （手机连同一 WiFi 可用）")

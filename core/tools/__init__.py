@@ -18,6 +18,9 @@
 """
 from __future__ import annotations
 
+import logging
+
+from core.tools import capabilities, dispatch
 from core.tools.external import get_weather, web_search
 from core.tools.local_data import (
     analyze_yield,
@@ -32,9 +35,17 @@ __all__ = [
     "TOOL_SCHEMAS",
     "TOOL_HANDLERS",
     "ToolResult",
+    "capabilities",
+    "dispatch",
     "execute_tool",
     "execute_tool_result",
 ]
+
+
+#: 本模块**不得使用 `print()`** —— MCP 服务端（stdlib 传输）的 **stdout 承载 JSON-RPC**，
+#: 任何写到 stdout 的东西都会污染协议（`tests/smoke_mcp.py` 第 3 节在守这条线）。
+#: 需要留痕时一律走 logging（写日志文件，不碰 stdout）。
+log = logging.getLogger(__name__)
 
 
 #: 名称 → 实现。**新增工具只需在此登记 + 在 schemas.py 加契约。**
@@ -59,11 +70,34 @@ def execute_tool(name: str, args: dict) -> str:
 def execute_tool_result(name: str, args: dict) -> ToolResult:
     """按名字执行工具，返回结构化结果（文本 + 可选图片）。
 
+    ★ **单一闸门**：本函数是工具的**唯一分发入口** —— 原生路径
+    （`rag_engine._execute_tool`）与 MCP（`mcp_server.py`）都经此处，
+    因此能力注解的判定**只在这里做一次**，不存在旁路。
+
     实现既可返回 `ToolResult`（如 `plot_trend`），也可返回裸 `str`
     （其余工具），此处统一包装。
     """
     handler = TOOL_HANDLERS.get(name)
     if handler is None:
-        return ToolResult(text=f"工具未找到: {name}")
+        # ★ 防线一：先试**别名/归一化**（`websearch` → `web_search`），
+        # 再放弃。**刻意不回落某个"默认工具"** —— 本项目的 6 个工具语义不相交，
+        # 替模型猜会给出"看起来正常、实际无关"的答案，比报错危险得多。
+        # 理由详见 `core/tools/dispatch.py` 的模块注释。
+        resolved = dispatch.resolve_tool_name(name, list(TOOL_HANDLERS))
+        if not resolved.ok:
+            log.warning("未知工具名: %r（已给出候选纠正）", name)
+            return ToolResult(text=resolved.message)
+        log.info("工具名归一: %r → %r（%s）", name, resolved.canonical, resolved.note)
+        name = resolved.canonical
+        handler = TOOL_HANDLERS[name]
+
+    # 能力闸门（fail-closed：闸门自身出错也拒绝）
+    decision = capabilities.guard(name, args)
+    if not decision.allowed:
+        # ⚠️ 用 logging 而不是 print：MCP 服务端的 stdout 是 JSON-RPC 协议通道。
+        # 拒绝理由仍会**随工具结果返回给模型**（见下），所以信息不会丢。
+        log.warning("工具调用被能力闸门拒绝: %s — %s", name, decision.reason)
+        return ToolResult(text=decision.as_error_text(name))
+
     out = handler(args or {})
     return out if isinstance(out, ToolResult) else ToolResult(text=str(out))

@@ -1,0 +1,77 @@
+# 感知计数 → 不确定性门控 → 决策报告
+#
+# ★ 这份 YAML 是**权威定义**：可 diff、可 review、可被静态校验与守卫。
+#
+# 【V1 的边界（必须知道）】
+#   本流程**不含 YOLO 推理** —— 输入是"已检测出的框数"（`n_boxes`），
+#   不是影像。真推理要 `ultralytics` + `.pt` 权重，属 V2。
+#   除此之外整条链都是真的：切片规划、密度换算、区间校准、门控、报告。
+#
+# 【为什么要经过门控】
+#   密度是**估计量**，带一个校准区间。区间宽窄决定这个数**能不能拿去做决策**：
+#     · 区间整体在阈值之上且不宽  → ADVISE（可正常建议）
+#     · 跨阈值但较窄              → QUALITATIVE（只能定性）
+#     · 跨阈值且很宽              → ESCALATE（弃答，建议补测）
+#   所以 `gate.uncertainty` 是**唯一**的四档出口，报告措辞由它决定。
+#
+# 【为什么阈值是输入而不是写死】
+#   75 个/m² 是"采收阈值"的密度形式，它取决于品种、密度目标与农艺口径，
+#   不同田块可能不同。写死在 YAML 里会让这份流程无法复用。
+id: perception_report
+version: 1
+description: 感知计数 → 契约记录 → 不确定性门控 → Markdown 决策报告（V1：不含 YOLO 推理）
+
+inputs:
+  field_id:        { type: string,  required: true }
+  n_boxes:         { type: integer, required: true }
+  altitude_m:      { type: number,  required: true }
+  threshold:       { type: number,  required: true }
+  calibration_path: { type: string, required: true }
+  camera:          { type: string,  required: false }
+  date:            { type: string,  required: false }
+  platform:        { type: string,  required: false }
+  detector_id:     { type: string,  required: false }
+  field_area_m2:   { type: number,  required: false }
+  invalid_tiles:   { type: integer, required: false }
+  out_dir:         { type: string,  required: false }
+
+nodes:
+  # ① 契约：框数 → 密度 + 校准区间
+  - id: record
+    type: perception.record
+    params:
+      n_boxes: "{{n_boxes}}"
+      altitude_m: "{{altitude_m}}"
+      calibration_path: "{{calibration_path}}"
+      camera: "{{camera}}"
+      field_id: "{{field_id}}"
+      date: "{{date}}"
+      platform: "{{platform}}"
+      detector_id: "{{detector_id}}"
+      field_area_m2: "{{field_area_m2}}"
+      invalid_tiles: "{{invalid_tiles}}"
+    side_effect: none
+
+  # ② ★ 门控：判四档。**只判不拦** —— 弃答不该中断流程，
+  #    而应当让报告把"信息不足"这个结论写出来。拦住反而没有报告可看。
+  - id: gate
+    type: gate.uncertainty
+    params:
+      lo: "{{record.lo}}"
+      hi: "{{record.hi}}"
+      threshold: "{{threshold}}"
+      value: "{{record.density}}"
+      # ★ 只判不拦：弃答也要让报告把「信息不足」写出来
+      mode: annotate
+    side_effect: none
+    needs: [record]
+
+  # ③ 报告：落盘成 Markdown（项目内目录，不碰用户工作区）
+  - id: report
+    type: report.markdown
+    params:
+      record: record
+      decision: gate
+      out_dir: "{{out_dir}}"
+    side_effect: disk
+    needs: [gate]

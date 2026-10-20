@@ -9,7 +9,8 @@
 """
 
 from PyQt6.QtCore import pyqtSignal, Qt, QSize
-from PyQt6.QtGui import QAction, QPainter, QPen, QPixmap
+from PyQt6.QtGui import QAction, QIcon, QPainter, QPen, QPixmap
+from config import resource_path
 from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -310,11 +311,17 @@ class SideBar(QWidget):
         bottom_row = QHBoxLayout()
         bottom_row.setContentsMargins(0, 0, 4, 0)
         bottom_row.addStretch()
-        self._settings_btn = QPushButton("⚙")
+        # ★ 2026-10-18：原来是文字字符 "⚙"（U+2699）。
+        #   字体字符会随字号被**栅格化成点阵**，在 16px 上边缘发虚、不够清晰。
+        #   改为矢量 SVG（细线轮廓 + 中心圆孔），任意 DPI 下都锐利。
+        self._settings_btn = QPushButton()
         self._settings_btn.setObjectName("settingsBtn")
+        self._settings_btn.setIcon(QIcon(str(resource_path("ui/icons/gear.svg"))))
+        self._settings_btn.setIconSize(QSize(22, 22))
         self._settings_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._settings_btn.setFixedSize(32, 32)
         self._settings_btn.setToolTip("设置")
+        self._settings_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._settings_btn.clicked.connect(self.settings_requested.emit)
         bottom_row.addWidget(self._settings_btn)
         layout.addLayout(bottom_row)

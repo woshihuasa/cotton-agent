@@ -1,0 +1,563 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>工作流运行视图 · 棉花种植决策智能体</title>
+<style>
+  /* ★ 零依赖：不引入任何 CSS 框架 / 前端库 / 构建工具（决策 1b）。
+     配色沿用设置页那套：浅灰底、白卡片、圆角 10px、绿=成功、红=失败。 */
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: "Microsoft YaHei", system-ui, sans-serif;
+         background: #f6f7f9; color: #1f2328; }
+  header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+           padding: 12px 18px; background: #fff; border-bottom: 1px solid #e3e5e8; }
+  header h1 { font-size: 15px; font-weight: 600; margin: 0; }
+  .spacer { flex: 1; }
+  select, button, input[type=text] {
+    font: inherit; font-size: 13px; padding: 6px 10px;
+    border: 1px solid #e3e5e8; border-radius: 8px; background: #fff; color: #1f2328;
+  }
+  button { cursor: pointer; }
+  button:hover { background: #f5f6f8; }
+  button.primary { border-color: #b7e2c8; background: #f2fbf6; color: #2e9e5b; }
+  button.danger { border: none; background: transparent; color: #d4380d; }
+  .badge { font-size: 11px; padding: 1px 8px; border-radius: 6px;
+           border: 1px solid #e3e5e8; background: #fafbfc; color: #8a919b; }
+  .badge.on { border-color: #b7e2c8; background: #f2fbf6; color: #2e9e5b; }
+
+  main { display: flex; height: calc(100vh - 57px); }
+  #canvasWrap { flex: 1; overflow: auto; position: relative; }
+  #canvas { display: block; background:
+      radial-gradient(circle, #e3e5e8 1px, transparent 1px) 0 0 / 22px 22px; }
+
+  aside { width: 340px; border-left: 1px solid #e3e5e8; background: #fff;
+          padding: 14px; overflow: auto; font-size: 13px; }
+  aside h2 { font-size: 13px; margin: 0 0 8px; color: #57606a; font-weight: 600; }
+  aside pre { white-space: pre-wrap; word-break: break-all; background: #f6f7f9;
+              border: 1px solid #e3e5e8; border-radius: 8px; padding: 8px;
+              font-size: 11px; max-height: 260px; overflow: auto; }
+  .kv { display: flex; gap: 8px; margin: 3px 0; }
+  .kv b { color: #8a919b; font-weight: normal; min-width: 62px; }
+
+  /* 节点（SVG 里用 class，不用内联样式，便于统一调色） */
+  .node rect.box { stroke: #e3e5e8; stroke-width: 1.5; rx: 10; }
+  .node.state-pending rect.box { fill: #ffffff; }
+  .node.state-running rect.box { fill: #fff8e6; stroke: #f0c36d; }
+  .node.state-done    rect.box { fill: #f2fbf6; stroke: #7fd0a2; }
+  .node.state-failed  rect.box { fill: #fff1f0; stroke: #f0a58f; }
+  .node.state-blocked rect.box { fill: #fff1f0; stroke: #d4380d; stroke-width: 2.5; }
+  .node.state-waiting rect.box { fill: #eef6ff; stroke: #7db3e8; }
+  .node text.id   { font-size: 13px; fill: #1f2328; font-weight: 600; }
+  .node text.meta { font-size: 10px; fill: #8a919b; }
+  .node text.elapsed { font-size: 10px; fill: #57606a; }
+  .node.selected rect.box { stroke: #2e9e5b; stroke-width: 2.5; }
+
+  .edge { stroke: #b9c0ca; stroke-width: 1.6; fill: none; }
+  .edge.flow { stroke: #7fd0a2; }
+  #arrow { fill: #b9c0ca; }
+
+  .hint { color: #8a919b; font-size: 12px; line-height: 1.7; }
+  .err { color: #d4380d; }
+  #yamlBox { width: 100%; min-height: 200px; font-family: Consolas, monospace;
+             font-size: 11px; border: 1px solid #e3e5e8; border-radius: 8px; padding: 8px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>工作流</h1>
+  <span id="modeBadge" class="badge">只读</span>
+  <select id="wfSel" title="选择工作流定义"></select>
+  <select id="runSel" title="选择一次运行"></select>
+  <span class="spacer"></span>
+  <button id="btnEdit">进入编辑</button>
+  <button id="btnSave" class="primary" style="display:none">保存 YAML</button>
+</header>
+
+<main>
+  <div id="canvasWrap"><svg id="canvas" width="900" height="600"></svg></div>
+  <aside>
+    <h2>节点详情</h2>
+    <div id="detail" class="hint">点一个节点看详情。</div>
+    <div id="editPanel" style="display:none; margin-top:16px;">
+      <h2>编辑（P4）</h2>
+      <div class="hint">
+        · <b>拖动</b>节点调整位置<br>
+        · <b>点「连线」</b>依次点两个节点 = 前者 → 后者<br>
+        · 拖拽结果会导出成 YAML，<b>YAML 是权威定义</b>
+      </div>
+      <div style="margin:8px 0; display:flex; gap:6px; flex-wrap:wrap;">
+        <input id="newNodeType" type="text" placeholder="tool.get_weather" style="width:150px">
+        <button id="btnAdd">添加节点</button>
+      </div>
+      <div style="margin:8px 0; display:flex; gap:6px;">
+        <button id="btnLink">连线</button>
+        <button id="btnUnlink">断开</button>
+        <button id="btnDel" class="danger">删除</button>
+      </div>
+      <textarea id="yamlBox" spellcheck="false"></textarea>
+    </div>
+  </aside>
+</main>
+
+<script>
+"use strict";
+// ★ 零依赖手写 SVG —— 没有 npm、没有 React、没有构建步骤（决策 1b）。
+//   数据来自后端三个只读接口：/api/workflows、/api/workflows/runs、/api/workflows/runs/{id}
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+const NODE_W = 176, NODE_H = 58, GAP_X = 74, GAP_Y = 26, PAD = 30;
+
+const state = {
+  mode: "view",           // view | edit
+  workflows: [],
+  wf: null,               // 当前工作流定义（含 nodes/edges）
+  runs: [],
+  run: null,              // 当前运行（含 steps 状态）
+  selected: null,         // 选中的节点 id
+  pos: {},                // 节点 id → {x, y}（编辑模式下可拖动）
+  linkFrom: null,         // 连线起点
+};
+
+// ── 极简 DOM 助手 ──
+const $ = (id) => document.getElementById(id);
+function el(tag, attrs = {}, text) {
+  const n = document.createElementNS(SVG_NS, tag);
+  for (const k in attrs) n.setAttribute(k, attrs[k]);
+  if (text != null) n.textContent = text;
+  return n;
+}
+
+// ── 数据获取 ──
+async function fetchJSON(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`${url} → HTTP ${r.status}`);
+  return r.json();
+}
+
+async function loadWorkflows() {
+  const d = await fetchJSON("/api/workflows");
+  state.workflows = d.workflows || [];
+  const sel = $("wfSel");
+  sel.innerHTML = "";
+  state.workflows.forEach(w => {
+    const o = document.createElement("option");
+    o.value = w.id;
+    o.textContent = w.error ? `${w.id}（读取失败）` : `${w.id} · ${w.nodes.length} 节点`;
+    sel.appendChild(o);
+  });
+  if (state.workflows.length) pickWorkflow(state.workflows[0].id);
+}
+
+function pickWorkflow(id) {
+  const wf = state.workflows.find(w => w.id === id);
+  if (!wf || wf.error) { state.wf = null; render(); return; }
+  state.wf = JSON.parse(JSON.stringify(wf));   // 复制一份，编辑不污染源数据
+  state.selected = null;
+  state.pos = {};
+  layout();
+  loadRuns(id);
+}
+
+async function loadRuns(workflowId) {
+  try {
+    const d = await fetchJSON("/api/workflows/runs?workflow_id=" + encodeURIComponent(workflowId || ""));
+    state.runs = (d.runs || []).filter(r => !workflowId || r.workflow_id === workflowId);
+  } catch { state.runs = []; }
+  const sel = $("runSel");
+  sel.innerHTML = "";
+  if (!state.runs.length) {
+    const o = document.createElement("option");
+    o.textContent = "（暂无运行记录）"; o.value = ""; sel.appendChild(o);
+    state.run = null;
+  } else {
+    state.runs.forEach(r => {
+      const o = document.createElement("option");
+      o.value = r.run_id;
+      o.textContent = `${r.run_id} · ${r.state}`;
+      sel.appendChild(o);
+    });
+    pickRun(state.runs[0].run_id);
+  }
+  render();
+}
+
+async function pickRun(runId) {
+  if (!runId) { state.run = null; render(); return; }
+  try { state.run = await fetchJSON("/api/workflows/runs/" + encodeURIComponent(runId)); }
+  catch { state.run = null; }
+  render();
+}
+
+function stepOf(nodeId) {
+  if (!state.run || !state.run.steps) return null;
+  return state.run.steps.find(s => s.node_id === nodeId) || null;
+}
+
+// ── 布局：按拓扑层级分 x，同层按顺序分 y ──
+function layout() {
+  const wf = state.wf;
+  if (!wf) return;
+  const depth = {};
+  const byId = {};
+  wf.nodes.forEach(n => byId[n.id] = n);
+
+  function d(id, guard) {
+    if (depth[id] != null) return depth[id];
+    if (guard.has(id)) return 0;               // 环保护：布局不崩
+    guard.add(id);
+    const node = byId[id];
+    const needs = (node && node.needs) || [];
+    depth[id] = needs.length ? 1 + Math.max(...needs.map(p => d(p, guard))) : 0;
+    guard.delete(id);
+    return depth[id];
+  }
+  wf.nodes.forEach(n => d(n.id, new Set()));
+
+  const layers = {};
+  wf.nodes.forEach(n => (layers[depth[n.id]] ||= []).push(n.id));
+
+  state.pos = {};
+  Object.keys(layers).map(Number).sort((a, b) => a - b).forEach(lx => {
+    layers[lx].sort().forEach((id, i) => {
+      state.pos[id] = { x: PAD + lx * (NODE_W + GAP_X),
+                        y: PAD + i * (NODE_H + GAP_Y) };
+    });
+  });
+}
+
+// ── 渲染 ──
+function render() {
+  const svg = $("canvas");
+  svg.innerHTML = "";
+  const wf = state.wf;
+  if (!wf) {
+    svg.appendChild(el("text", { x: 30, y: 40, "font-size": 13, fill: "#8a919b" },
+      "没有可显示的工作流 —— 在 workflows/ 下放一个 .yaml 试试"));
+    $("detail").innerHTML = '<span class="hint">没有可显示的工作流。</span>';
+    return;
+  }
+
+  // 尺寸
+  let maxX = 0, maxY = 0;
+  Object.values(state.pos).forEach(p => {
+    maxX = Math.max(maxX, p.x + NODE_W); maxY = Math.max(maxY, p.y + NODE_H);
+  });
+  svg.setAttribute("width", Math.max(600, maxX + PAD));
+  svg.setAttribute("height", Math.max(400, maxY + PAD));
+
+  // 箭头标记
+  const defs = el("defs");
+  const marker = el("marker", { id: "arrow", viewBox: "0 0 10 10", refX: "9", refY: "5",
+                                markerWidth: "7", markerHeight: "7", orient: "auto-start-reverse" });
+  marker.appendChild(el("path", { d: "M 0 0 L 10 5 L 0 10 z" }));
+  defs.appendChild(marker);
+  svg.appendChild(defs);
+
+  // 边
+  wf.edges.forEach(e => {
+    const a = state.pos[e.from], b = state.pos[e.to];
+    if (!a || !b) return;
+    const x1 = a.x + NODE_W, y1 = a.y + NODE_H / 2;
+    const x2 = b.x, y2 = b.y + NODE_H / 2;
+    const mx = (x1 + x2) / 2;
+    const done = (stepOf(e.from) || {}).state === "done";
+    svg.appendChild(el("path", {
+      d: `M ${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}`,
+      class: "edge" + (done ? " flow" : ""), "marker-end": "url(#arrow)",
+    }));
+  });
+
+  // 节点
+  wf.nodes.forEach(n => {
+    const p = state.pos[n.id];
+    if (!p) return;
+    const st = stepOf(n.id);
+    const stName = st ? st.state : "pending";
+    const g = el("g", { class: `node state-${stName}` + (state.selected === n.id ? " selected" : ""),
+                        "data-id": n.id, transform: `translate(${p.x},${p.y})` });
+
+    g.appendChild(el("rect", { class: "box", width: NODE_W, height: NODE_H, rx: 10 }));
+    g.appendChild(el("text", { class: "id", x: 12, y: 22 }, n.id));
+    g.appendChild(el("text", { class: "meta", x: 12, y: 40 }, n.type));
+
+    // 状态文字 + 耗时
+    const label = { pending: "待跑", running: "运行中", done: "完成",
+                    failed: "失败", blocked: "熔断", waiting: "等确认",
+                    resumed: "已放行" }[stName] || stName;
+    g.appendChild(el("text", { class: "meta", x: 12, y: 52 }, "[" + label + "]"));
+    const dur = elapsed(st);
+    if (dur) g.appendChild(el("text", { class: "elapsed", x: NODE_W - 12, y: 52,
+                                        "text-anchor": "end" }, dur));
+
+    // 交互
+    g.addEventListener("click", (ev) => { ev.stopPropagation(); onNodeClick(n.id); });
+    if (state.mode === "edit") attachDrag(g, n.id);
+    svg.appendChild(g);
+  });
+
+  renderDetail();
+  if (state.mode === "edit") syncYaml();
+}
+
+function elapsed(st) {
+  if (!st || !st.started_at || !st.ended_at) return "";
+  const a = Date.parse(st.started_at), b = Date.parse(st.ended_at);
+  if (isNaN(a) || isNaN(b) || b < a) return "";
+  const s = (b - a) / 1000;
+  return s < 1 ? `${Math.round(s * 1000)}ms` : `${s.toFixed(1)}s`;
+}
+
+// ── 拖动（P4）──
+function attachDrag(g, id) {
+  let startX = 0, startY = 0, origX = 0, origY = 0, dragging = false;
+  g.style.cursor = "grab";
+  g.addEventListener("mousedown", (e) => {
+    if (state.linkFrom) return;                // 连线模式不拖
+    dragging = true;
+    startX = e.clientX; startY = e.clientY;
+    origX = state.pos[id].x; origY = state.pos[id].y;
+    g.style.cursor = "grabbing";
+    e.preventDefault();
+  });
+  window.addEventListener("mousemove", (e) => {
+    if (!dragging) return;
+    state.pos[id].x = Math.max(0, origX + (e.clientX - startX));
+    state.pos[id].y = Math.max(0, origY + (e.clientY - startY));
+    render();
+  });
+  window.addEventListener("mouseup", () => {
+    if (!dragging) return;
+    dragging = false;
+    g.style.cursor = "grab";
+    syncYaml();
+  });
+}
+
+// ── 选择与详情 ──
+function onNodeClick(id) {
+  if (state.mode === "edit" && state.linkFrom) {
+    if (state.linkFrom !== id) {
+      // 加一条边（去掉重复）
+      const exists = state.wf.edges.some(e => e.from === state.linkFrom && e.to === id);
+      if (!exists) {
+        state.wf.edges.push({ from: state.linkFrom, to: id });
+        const target = state.wf.nodes.find(n => n.id === id);
+        if (target && !target.needs.includes(state.linkFrom)) target.needs.push(state.linkFrom);
+      }
+    }
+    state.linkFrom = null;
+    $("btnLink").textContent = "连线";
+    layout(); render();
+    return;
+  }
+  state.selected = id;
+  render();
+}
+
+function renderDetail() {
+  const box = $("detail");
+  const id = state.selected;
+  if (!id || !state.wf) {
+    box.innerHTML = '<span class="hint">点一个节点看详情。</span>';
+    return;
+  }
+  const node = state.wf.nodes.find(n => n.id === id);
+  const st = stepOf(id);
+  const rows = [
+    ["节点", id],
+    ["类型", node ? node.type : "-"],
+    ["副作用", node ? (node.side_effect || "未声明") : "-"],
+    ["状态", st ? st.state : "（无运行记录）"],
+    ["尝试", st ? st.attempts : "-"],
+    ["耗时", st ? (elapsed(st) || "-") : "-"],
+    ["依赖", node ? (node.needs.join(", ") || "无") : "-"],
+  ];
+  let html = rows.map(([k, v]) => `<div class="kv"><b>${k}</b><span>${v ?? "-"}</span></div>`).join("");
+  if (st && st.error) html += `<div class="kv err"><b>错误</b><span>${escapeHTML(st.error)}</span></div>`;
+  if (st && st.output) html += `<h2 style="margin-top:12px">产出</h2><pre>${escapeHTML(st.output)}</pre>`;
+  box.innerHTML = html;
+}
+
+function escapeHTML(s) {
+  return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;",
+                                                '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+// ── YAML 导出（P4）──
+// ★ 只生成"定义态"的三要素（id / nodes / needs / params / side_effect），
+//   不试图重写注释 —— 那需要完整 YAML 保真，会把简单事做复杂。
+function exportYAML() {
+  const wf = state.wf;
+  if (!wf) return "";
+  const lines = [];
+  lines.push(`# ${wf.description || wf.id}`);
+  lines.push(`# 由工作流编辑器导出（YAML 是权威定义，可提交 git）`);
+  lines.push(`id: ${wf.id}`);
+  lines.push(`version: ${wf.version || 1}`);
+  if (wf.description) lines.push(`description: ${JSON.stringify(wf.description)}`);
+  lines.push("nodes:");
+  wf.nodes.forEach(n => {
+    lines.push(`  - id: ${n.id}`);
+    lines.push(`    type: ${n.type}`);
+    const needs = n.needs || [];
+    if (needs.length) lines.push(`    needs: [${needs.join(", ")}]`);
+    if (n.side_effect) lines.push(`    side_effect: ${n.side_effect}`);
+    if (n.optional) lines.push(`    optional: true`);
+  });
+  lines.push("");
+  lines.push("# 注意：本导出不保留 params（参数在原始 YAML 里更易读）。");
+  lines.push("# 若要保留参数，请直接编辑原始 YAML 文件。");
+  return lines.join("\n") + "\n";
+}
+
+function syncYaml() {
+  const box = $("yamlBox");
+  if (box) { box.value = exportYAML(); box.readOnly = true; }
+}
+
+// ── 编辑动作 ──
+function addNode() {
+  const t = ($("newNodeType").value || "").trim();
+  if (!t) { alert("请填节点类型，例如 tool.get_weather"); return; }
+  let base = t.split(".").pop().replace(/[^A-Za-z0-9_]/g, "_") || "node";
+  let id = base, i = 2;
+  while (state.wf.nodes.some(n => n.id === id)) id = `${base}_${i++}`;
+  state.wf.nodes.push({ id, type: t, needs: [], side_effect: null, optional: false });
+  state.pos[id] = { x: PAD, y: PAD + state.wf.nodes.length * (NODE_H + GAP_Y) };
+  $("newNodeType").value = "";
+  render();
+}
+
+function deleteNode() {
+  const id = state.selected;
+  if (!id) { alert("先选一个节点"); return; }
+  if (!confirm(`删除节点 ${id}？`)) return;
+  state.wf.nodes = state.wf.nodes.filter(n => n.id !== id);
+  state.wf.edges = state.wf.edges.filter(e => e.from !== id && e.to !== id);
+  state.wf.nodes.forEach(n => { n.needs = (n.needs || []).filter(x => x !== id); });
+  delete state.pos[id];
+  state.selected = null;
+  layout(); render();
+}
+
+function unlinkSelected() {
+  const id = state.selected;
+  if (!id) { alert("先选一个节点"); return; }
+  state.wf.edges = state.wf.edges.filter(e => e.to !== id);
+  const n = state.wf.nodes.find(x => x.id === id);
+  if (n) n.needs = [];
+  layout(); render();
+}
+
+async function saveYaml() {
+  const wf = state.wf;
+  if (!wf) return;
+  // ★ 编辑模式的保存走**后端校验**：校验不过就不写盘。
+  //   这里传一个"完整 YAML"（含 params 需要原文）—— 所以先从后端取原文再合并。
+  try {
+    const orig = await fetchJSON(`/api/workflows/${encodeURIComponent(wf.id)}/yaml`);
+    if (orig.error) { alert("取原始 YAML 失败：" + orig.error); return; }
+    const merged = mergeIntoYaml(orig.yaml_text, wf);
+    const r = await fetch(`/api/workflows/${encodeURIComponent(wf.id)}`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ yaml_text: merged, overwrite: true }),
+    });
+    const d = await r.json();
+    if (!d.ok) {
+      alert("保存失败（" + d.stage + "）：\n" + d.error +
+            (d.issues ? "\n\n" + d.issues.join("\n") : ""));
+      return;
+    }
+    alert("已保存到 " + d.path + (d.warnings && d.warnings.length
+          ? "\n\n警告：\n" + d.warnings.join("\n") : ""));
+    await loadWorkflows();
+  } catch (e) { alert("保存出错：" + e.message); }
+}
+
+// 在原文里改 needs / 删节点 —— **保守做法**：只重写 needs 行，保留 params 与注释。
+function mergeIntoYaml(origText, wf) {
+  const wanted = {};
+  wf.nodes.forEach(n => wanted[n.id] = n.needs || []);
+  const kept = new Set(wf.nodes.map(n => n.id));
+  const lines = origText.split("\n");
+  const out = [];
+  let cur = null;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const m = line.match(/^(\s*)-\s+id:\s*([A-Za-z0-9_:-]+)\s*$/);
+    if (m) {
+      cur = m[2];
+      if (!kept.has(cur)) {                     // 被删掉的节点：跳过它整块
+        i++;
+        while (i < lines.length && (/^\s{2,}\S/.test(lines[i]) || !lines[i].trim())) i++;
+        i--;
+        cur = null;
+        continue;
+      }
+      out.push(line);
+      continue;
+    }
+    if (cur && /^\s+needs:/.test(line)) {       // 重写 needs
+      const needs = wanted[cur] || [];
+      out.push(needs.length ? `    needs: [${needs.join(", ")}]` : null);
+      continue;
+    }
+    out.push(line);
+  }
+  // 追加新节点（原文里没有的）
+  const inOrig = new Set((origText.match(/-\s+id:\s*([A-Za-z0-9_:-]+)/g) || [])
+    .map(s => s.split(":")[1].trim()));
+  const added = wf.nodes.filter(n => !inOrig.has(n.id));
+  if (added.length) {
+    out.push("");
+    added.forEach(n => {
+      out.push(`  - id: ${n.id}`);
+      out.push(`    type: ${n.type}`);
+      const needs = n.needs || [];
+      if (needs.length) out.push(`    needs: [${needs.join(", ")}]`);
+      if (n.side_effect) out.push(`    side_effect: ${n.side_effect}`);
+    });
+  }
+  return out.filter(x => x !== null).join("\n");
+}
+
+// ── 模式切换 ──
+function setMode(mode) {
+  state.mode = mode;
+  state.linkFrom = null;
+  const editing = mode === "edit";
+  $("modeBadge").textContent = editing ? "编辑中" : "只读";
+  $("modeBadge").className = "badge" + (editing ? " on" : "");
+  $("btnEdit").textContent = editing ? "退出编辑" : "进入编辑";
+  $("btnSave").style.display = editing ? "" : "none";
+  $("editPanel").style.display = editing ? "" : "none";
+  render();
+}
+
+// ── 事件绑定 ──
+$("wfSel").addEventListener("change", e => pickWorkflow(e.target.value));
+$("runSel").addEventListener("change", e => pickRun(e.target.value));
+$("btnEdit").addEventListener("click", () => setMode(state.mode === "edit" ? "view" : "edit"));
+$("btnSave").addEventListener("click", saveYaml);
+$("btnAdd").addEventListener("click", addNode);
+$("btnDel").addEventListener("click", deleteNode);
+$("btnUnlink").addEventListener("click", unlinkSelected);
+$("btnLink").addEventListener("click", () => {
+  const id = state.selected;
+  if (!id) { alert("先选起点节点"); return; }
+  state.linkFrom = id;
+  $("btnLink").textContent = `连线中：点目标节点（起点 ${id}）`;
+});
+document.addEventListener("click", (e) => {
+  if (e.target.id === "canvas") { state.selected = null; render(); }
+});
+
+// ── 启动 ──
+loadWorkflows().catch(err => {
+  $("detail").innerHTML = `<span class="hint err">加载失败：${escapeHTML(err.message)}<br>
+    （需要先启动 Web 服务：python server.py）</span>`;
+});
+</script>
+</body>
+</html>

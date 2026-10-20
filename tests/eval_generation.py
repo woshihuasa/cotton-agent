@@ -61,7 +61,7 @@ sys.path.insert(0, ROOT)
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
 from config import AppConfig                   # noqa: E402
-from core.llm_client import LLMClient          # noqa: E402
+from core import providers                     # noqa: E402
 from core.rag_engine import RAGEngine          # noqa: E402
 
 # ── 拒答特征词（程序判定用；命中任一即视为"拒答/未作答"）──
@@ -73,9 +73,11 @@ from core.rag_engine import RAGEngine          # noqa: E402
 #    与 5.5 记录的"回答被截断"「judge 上下文缺失」同属"评测方法自身出错"一类）。
 #    故补充了下方的口语化表达。
 #
-# ⚠️ 已知残余风险：`建议咨询` 偏宽泛 —— 正常回答里出现「建议咨询当地农技部门」
-#    也会被判为拒答。当前 20 条集里未触发，但扩充评测集时需留意，
-#    更稳妥的做法是改为"位置限定"（如仅当该词出现在回答前 1/3）或交给 judge 判定。
+# ⚠️ 已知残余风险（**2026-10-18 已实测触发并修复，见 is_refusal**）：
+#    `建议咨询` 偏宽泛 —— 正常回答里出现「建议咨询当地农技部门」也会被判为拒答。
+#    当时文档写的是"当前 20 条集里未触发，扩充时需改为位置限定或交给 judge 判定"。
+#    **换模型重跑后它真的触发了**：20 条里 2 条误判（#2 命中位置 1206 字、
+#    #10 命中位置 2115 字），两条都出现在**本该谨慎表述的投资类问题**的免责段里。
 REFUSE_KEYWORDS = [
     "未找到", "没有找到", "暂无", "无相关", "资料中没有", "知识库中没有",
     "无法回答", "无法提供", "不能提供", "超出我的", "超出能力范围",
@@ -84,6 +86,45 @@ REFUSE_KEYWORDS = [
     "回答不了", "不在我的服务范围", "不在服务范围", "帮不上",
     "无法为您", "无法查证", "不具备", "不便回答", "无此",
 ]
+
+#: ★ **拒答判定只看回答的前 N 个字符**（2026-10-18 修复）。
+#:
+#: 【为什么改为位置限定】原实现是 `any(k in answer for k in KEYWORDS)` ——
+#: **只要整篇回答任何位置出现一个词就算拒答**。于是：
+#:   · #2「3128B 价格涨跌」完整给出了 +18.43% 与图表，只因末尾写着
+#:     「交易操作层面……建议咨询具备资质的期货机构」→ 被判成拒答 ✗
+#:   · #10「适合囤货吗」完整给出 84.4 分位，只因写着「本助手无法提供指导」→ 被判成拒答 ✗
+#:
+#: 【为什么是 200 字，而不是按长度判】实测四条样本（2026-10-18，`deepseek-v4.1-flash`）：
+#:
+#:   | 判定 | 关键词首次出现位置 | 回答长度 |
+#:   |---|---|---|
+#:   | ✅ 真拒答 #7  | **103** | 1791  ← 比误判那条还长！ |
+#:   | ✅ 真拒答 #17 | **21**  | 764 |
+#:   | ❌ 误判 #2    | **1206** | 1410 |
+#:   | ❌ 误判 #10   | **2115** | 2716 |
+#:
+#: **长度完全不具区分度**（真拒答有 1791 字的），而**位置一刀就能切开**：
+#: 真拒答的词都在**前 120 字**，误判的词都在 **1200 字之后**。
+#: 取 200 字留了约 1.7 倍余量，仍能完美区分这四条。
+#:
+#: 【为什么是"位置"这个判据】真实的拒答有个共同形态：**它一开口就拒绝**。
+#: 而免责声明/能力边界说明**总是出现在长篇回答的末尾**。
+#: 两者在语义上完全不同，只是**词面相同** —— 所以必须靠位置区分。
+REFUSE_SCAN_CHARS = 200
+
+
+def is_refusal(answer: str) -> bool:
+    """程序判定：回答是否属于拒答/未作答。
+
+    ★ **只看前 `REFUSE_SCAN_CHARS` 个字符** —— 详见该常量的注释。
+    这个改动把 20 条样本里的拒答准确率从 90.0% 修正回 **100%**
+    （两条误判都是"正常回答末尾的免责声明"，不是产品退步）。
+    """
+    if not answer:
+        return False
+    head = answer[:REFUSE_SCAN_CHARS]
+    return any(k in head for k in REFUSE_KEYWORDS)
 
 # ── LLM-as-judge 提示词（评估要点覆盖 + 忠实度）──
 JUDGE_PROMPT = """你是回答质量评审专家。请根据【用户问题】【期望要点】【模型回答】进行判定。
@@ -131,11 +172,6 @@ def load_cases(path: str) -> list[dict]:
             if line:
                 cases.append(json.loads(line))
     return cases
-
-
-def is_refusal(answer: str) -> bool:
-    """程序判定：回答是否属于拒答/未作答（含拒答特征词）。"""
-    return any(k in answer for k in REFUSE_KEYWORDS)
 
 
 def parse_judge(text: str) -> dict:
@@ -193,6 +229,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="生成质量评测（忠实度 / 拒答率）")
     parser.add_argument("--limit", type=int, default=0, help="只跑前 N 条（0 = 全部）")
     parser.add_argument("--verbose", action="store_true", help="打印完整回答（人工校准用）")
+    parser.add_argument("--answers-out", default="",
+                        help="把**真实回答**写成 JSONL（供 judge 实验离线复用）。"
+                             "★ 不存回答的话，每次换 judge 都要重跑整条链路（约 100+ 次调用）；"
+                             "存下来之后 judge 实验可反复跑、可审计、可复现。")
     args = parser.parse_args()
 
     cases = load_cases(os.path.join("tests", "eval_data", "e2e_set.jsonl"))
@@ -203,7 +243,13 @@ def main() -> None:
     # 隔离作用域：全部用户数据落在沙箱，绝不触碰生产存档与记忆库
     sandbox = _make_eval_sandbox()
     engine = RAGEngine(user_data_dir=sandbox)   # 完整引擎（含知识库、会话、工具）
-    judge = LLMClient()
+    # judge 也走 `default_client()` —— 与引擎**同一个服务商**，
+    # 这样"同模型自评"这个前提在选择服务商后依然成立（口径不变）。
+    # ⚠️ judge **不走 failover**（评测中途换模型 => 前后两半是两个评委）。
+    judge = providers.default_client()
+    #: 记录 judge 是哪家模型（★ 本项目的 judge 与**被测系统同模型** —— 这正是"同模型自评"
+    #: 那个方法论缺陷，落盘时要写清"是谁评的"，否则以后没人能复现这个口径）
+    judge_model_label = getattr(judge, "_model", "?")
 
     cover_ok = faithful_ok = 0
     refuse_correct = 0
@@ -211,6 +257,11 @@ def main() -> None:
     judged_n = 0
     fails = []
     chain_errors: list[tuple[int, str, str]] = []   # [(id, question, reason)]
+
+    #: 每条的完整记录（回答 + 判定），供 `--answers-out` 落盘
+    records: list[dict] = []
+    #: 回答是哪家模型产的（judge 实验要写清"被评的是谁"）
+    answer_model = getattr(getattr(engine, "llm", None), "_model", "?")
 
     for case in cases:
         q = case["question"]
@@ -299,6 +350,22 @@ def main() -> None:
                 if not (covers and faithful):
                     fails.append((case["id"], q, covers, faithful, verdict.get("reason", "")))
 
+        records.append({
+            "id": case["id"],
+            "question": q,
+            "key_points": case.get("key_points", []),
+            "should_refuse": should_refuse,
+            "refused": refused,
+            "answer": answer,
+            "chain_error": (str(chain_error) if chain_error else None),
+            "covers": covers,
+            "faithful": faithful,
+            "reason": (verdict.get("reason", "") if verdict else ""),
+            "elapsed": round(elapsed, 1),
+            "answer_model": answer_model,
+            "judge_model": judge_model_label,
+        })
+
         print("  #%2d %-34s 拒答=%s(期望%s) 覆盖=%s 忠实=%s %.0fs" %
               (case["id"], q[:34], "是" if refused else "否",
                "是" if should_refuse else "否",
@@ -308,6 +375,15 @@ def main() -> None:
         if args.verbose:
             print("     回答: %s" % answer[:300].replace("\n", " "))
             print("-" * 60)
+
+    if args.answers_out:
+        out_path = Path(args.answers_out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        with out_path.open("w", encoding="utf-8") as f:
+            for r in records:
+                f.write(json.dumps(r, ensure_ascii=False) + "\n")
+        print("\n[落盘] 真实回答已写入 %s（%d 条）" % (out_path, len(records)))
+        print("[落盘] ★ 之后换 judge 可直接复用，**无需重跑整条链路**")
 
     total = len(cases)
     invalid_n = len(chain_errors)

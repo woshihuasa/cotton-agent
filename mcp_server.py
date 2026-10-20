@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""棉花智能问答助手 · MCP Server（stdio）
+"""棉花种植决策智能体 · MCP Server（stdio）
 
 把 6 个本地工具通过 **Model Context Protocol** 暴露给任意支持 MCP 的宿主
 （Claude Desktop / Cursor / Cline 等）。
@@ -121,12 +121,18 @@ class CottonMCPServer(MCPServer):
         让宿主模型能读到错误原因并自行纠正，比直接断开连接更友好。
         """
         if name not in TOOL_HANDLERS:
-            return CallToolResult(
-                content=[{"type": "text",
-                          "text": f"未知工具: {name}。可用工具: "
-                                  f"{', '.join(sorted(TOOL_HANDLERS))}"}],
-                is_error=True,
-            )
+            # ★ 与原生路径**共用同一份**未知工具提示（`core.tools.dispatch`）——
+            # 原来这里是第二份手写文案（"未知工具: X。可用工具: ..."），
+            # 属于本项目一直在防的"两份地图"。现在只有一份。
+            from core.tools import dispatch as _dispatch
+            resolved = _dispatch.resolve_tool_name(name, list(TOOL_HANDLERS))
+            if not resolved.ok:
+                return CallToolResult(
+                    content=[{"type": "text",
+                              "text": resolved.message.replace("工具未找到", "未知工具", 1)}],
+                    is_error=True,
+                )
+            name = resolved.canonical
 
         args = with_mcp_overrides(name, arguments or {})
         result = execute_tool_result(name, args)
@@ -137,7 +143,7 @@ def build_server() -> CottonMCPServer:
     """构造服务实例（供入口与测试共用）。"""
     return CottonMCPServer(
         name="cotton-agent",
-        title="棉花智能问答助手工具集",
+        title="棉花种植决策智能体工具集",
         description="新疆棉花种植的天气、统计、价格、绘图与产量分析工具",
         instructions=INSTRUCTIONS,
         version=VERSION or "dev",

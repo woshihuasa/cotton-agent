@@ -95,13 +95,32 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=0, help="只跑前 N 条（0 = 全部）")
     parser.add_argument("--repeat", type=int, default=1, help="重复运行次数（默认 1，用于评估稳定性）")
     parser.add_argument("--verbose", action="store_true", help="打印模型决策详情（含通过项）")
+    # ★ 新增：指定模型 / 服务商 —— 用于**成本分层路由的前置测试**
+    # （判据见 `docs/LLM_GATEWAY.md` §13.3：L1 换模型后工具选择准确率下降 > 2pp 就不许降档）
+    parser.add_argument("--model", default="", help="覆盖模型名（留空 = 用默认服务商的默认模型）")
+    parser.add_argument("--provider", default="", help="覆盖服务商名（留空 = 用 LLM_PROVIDER）")
     args = parser.parse_args()
 
     cases = load_cases(os.path.join("tests", "eval_data", "tool_set.jsonl"))
     if args.limit:
         cases = cases[: args.limit]
 
-    client = LLMClient()
+    if args.provider:
+        from core import providers as _providers
+        client = _providers.resolve(args.provider, model=args.model or None)
+    elif args.model:
+        # 只换模型、不换服务商 —— 正是"成本分层"的做法（同一家、换个档位）
+        from core import providers as _providers
+        _name = _providers.default_provider()
+        client = (_providers.resolve(_name, model=args.model) if _name
+                  else LLMClient(model=args.model))
+    else:
+        # ★ 走**网关的默认入口**，而不是裸 `LLMClient()`。
+        # 裸 `LLMClient()` 读的是 `DEEPSEEK_*`，会**绕过 `LLM_PROVIDER`**
+        # —— 实测踩过：默认服务商设成 qwen 后，这里仍然在调 DeepSeek 官方 API。
+        from core import providers as _providers
+        client = _providers.default_client()
+    print("实际模型: %s" % getattr(client, "_model", "?"))
     tools = RAGEngine._get_local_tool_schemas()
     total = len(cases)
     repeat = max(1, args.repeat)
