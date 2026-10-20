@@ -212,19 +212,7 @@ python tests/run_all.py               # 产物: eval_report.md（自动区块重
 
 ---
 
-## 五、不进版本控制的文件
-
-- **密钥与凭据**：`.env`、`credentials.json`、`providers.json`
-- **本地数据**：`session_state.json*`、`chroma_db/`、`chroma_user_memory/`、`procedural_memory/`
-- **运行时产物**：`reports/`、`charts/`、`workflows/runs/`、`*.log`
-- **构建产物**：`release/`、`dist/`、`build/`、`*.zip`、`build_version.txt`
-- **临时与缓存**：`tests/eval_outputs/`、`tests/eval_fixtures/`、`data-gym-cache/`、`cotton_test_*/`、`tmp*/`、`.mplconfig/`、`torchinductor_*/`
-- **本地文档与脚本**：`docs/`、`_*.md`、`_*probe*.py`
-- **通用**：`__pycache__/`、`.venv/`、`.idea/`、`.vscode/`、`.reasonix/`
-
----
-
-## 六、项目结构
+## 五、项目结构
 
 ```
 cotton_agent/
