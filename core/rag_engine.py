@@ -278,6 +278,22 @@ TITLE_PROMPT = (
 )
 
 
+#: 工具循环的**轮次上限**（2026-10-26 由 3 提到 8）。
+#:
+#: 【为什么原来写 3】初版依据是「3 轮的批处理够用」—— 那个判断**把「轮」当成了「次」**。
+#:   一轮内模型可以发**多个** `tool_calls`，所以 3 轮的实际容量远大于 3 次调用
+#:   （`docs/HANDOFF.md` 记录了那次被实测推翻的判断）。
+#:
+#: 【为什么提到 8】`tests/measure_rounds.py` 实测 7 个问题：轮数分布 0轮×1 / 2轮×5 / 3轮×1，
+#:   **撞墙率 0%**。所以 3 轮**当前没成为瓶颈**，提到 8 是**留余量**而不是修瓶颈 ——
+#:   真实需要多轮的任务（模型行为比预期灵活：会混用 region / top / 不同 stat）这批问题没覆盖到。
+#:   代价：最坏情况轮数 ×2.7。`LoopGuard(max_repeat=1)` 仍会短路完全相同的重复调用，
+#:   兜住"原地打转"这一类。
+#:
+#: ★ 改这个数字时 `tests/check_handoff.py` 的轮数断言会跟着走（它读本常量，不写死 3）。
+MAX_TOOL_ROUNDS = 8
+
+
 # ---------------------------------------------------------------------------
 # Session 数据类
 # ---------------------------------------------------------------------------
@@ -1092,7 +1108,7 @@ class RAGEngine:
                 **行为与改动前完全一致**。
         """
         llm = llm or self.llm
-        max_loops = 3  # 安全上限
+        max_loops = MAX_TOOL_ROUNDS        # 见模块顶部：上限值与「为什么是 8」的依据
 
         # ★ 三层防线（`core/tools/dispatch.py`）：
         #   ① 名字解析（别名归一 / 带候选的纠正）—— 在 `execute_tool_result` 里生效
@@ -1110,6 +1126,19 @@ class RAGEngine:
 
         for round_no in range(max_loops):
             rounds_done = round_no + 1
+
+            # ★ 最后一轮：**先把预算告诉模型**，再让它决定这一轮干什么。
+            #   在此之前模型不知道自己的轮次预算（`max_loops` 从未进过消息），
+            #   所以它会在跑满后拿部分结果组织出一段"看起来完整"的答案。
+            #   边界说清了，它才有机会如实收尾。
+            if rounds_done == max_loops:
+                messages.append({
+                    "role": "user",
+                    "content": "【轮次提醒】这是工具调用的最后一轮。请基于已有结果直接回答；"
+                               "如果信息不足以完整回答，请在回答里明确说明已经查了什么、"
+                               "还缺什么，不要用推测填补缺口。",
+                })
+
             msg = llm.chat_with_tools(messages, tools, model_name)
             if msg is None:
                 break
@@ -1555,7 +1584,7 @@ class RAGEngine:
             # ★★ 真执行（不再只是"告知"）——
             #   生成工作流 → 静态校验 → **后台启动**（不阻塞本流式回答）
             #   工作流会停在 `human.confirm` 等人签字；批准后落盘一份部分结果存档。
-            outcome = handoff.execute(handoff_decision.inputs)
+            outcome = handoff.HandoffOutcome(ok=False, error="移交已封存")  # 封存，见 docs/HANDOFF.md
             note = handoff.partial_notice(
                 handoff_decision.inputs,
                 handoff_ok=outcome.ok,

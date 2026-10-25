@@ -148,9 +148,14 @@ def main() -> int:
     c.check("★ 主动结束时轮数是 2", r1 == 2, str(r1))
 
     # ② 轮次跑满仍要工具（每轮都要）—— 这是核心新增
-    _, w2, r2 = _run([_Msg("", n_calls=1)] * 3)
+    #   ★ 脚本长度必须**跟上限一致**：`_FakeLLM` 脚本用完后返回"无工具调用"，
+    #     给少了循环会**自然 break**（wants_more=False），测的就不是"跑满"了。
+    #     所以读常量而不是写死 3 —— 见 `core/rag_engine.py` 的 `MAX_TOOL_ROUNDS`。
+    from core.rag_engine import MAX_TOOL_ROUNDS as _MAX_ROUNDS
+    _n_rounds = _MAX_ROUNDS
+    _, w2, r2 = _run([_Msg("", n_calls=1)] * _n_rounds)
     c.check("★★★ 轮次跑满仍要工具 → wants_more = True", w2 is True, str(w2))
-    c.check("★ 跑满时轮数 = max_loops(3)", r2 == 3, str(r2))
+    c.check(f"★ 跑满时轮数 = MAX_TOOL_ROUNDS({_n_rounds})", r2 == _n_rounds, str(r2))
 
     # ③ 第 1 轮就不要工具（正常短问）
     _, w3, r3 = _run([_Msg("直接回答")])
@@ -321,11 +326,11 @@ nodes:
     finally:
         handoff.build_resume_yaml = orig
 
-    # ★ 回退时的措辞：必须让用户知道"没启动"，而不是静默
+    # ★ 回退时的措辞：必须让用户知道"没转入任务模式"，而不是静默
     back_note = handoff.partial_notice(
         inputs, handoff_ok=False, handoff_msg="生成的工作流未通过静态校验")
-    c.check("★★ 回退时明确告知「任务模式未能启动」",
-            "未能启动" in back_note, back_note[-120:])
+    c.check("★★ 回退时明确告知「本次没有转入任务模式」",
+            "没有转入任务模式" in back_note, back_note[-120:])
 
     # ------------------------------------------------------------------
     c.section("第 5 步：★★★ 端到端 —— 静默失败必须变成显式告知")
@@ -442,10 +447,15 @@ nodes:
                 handoff.PARTIAL_MARKER in text, text[-120:])
         c.check("★★ 明确说了任务没走完", "没有走完" in text)
         c.check("★★ 给出已完成的步数", "前 1 步" in text or "前 2 步" in text)
-        # ★ 移交现在**会真的启动工作流**，所以措辞从"请拆小问题"
-        #   变成"已尝试转入任务模式（run_id=…）" —— 断言随之更新。
-        c.check("★★★ 给出「已转入任务模式」+ run_id（可追踪）",
-                "已尝试转入" in text and "run_id=" in text, text[-160:])
+        # ★ 移交已于 2026-10-26 **封存** —— 措辞从"已尝试转入任务模式（run_id=…）"
+        #   退回「如实告知 + 给出可执行建议」。断言随之更新：
+        #   现在要证明的是**没有启动工作流**（无 run_id）且**把话说清楚了**。
+        c.check("★★★ 移交已封存：**不再出现 run_id**（工作流没有启动）",
+                "run_id=" not in text, text[-200:])
+        c.check("★★ 封存后给出**可执行的建议**（把问题拆小）",
+                "拆小" in text, text[-200:])
+        c.check("★ 说明本次没有转入任务模式的原因（不是静默失败）",
+                "没有转入任务模式" in text, text[-200:])
         c.check("★★ 引擎记录了 wants_more（可被上层消费）",
                 e2e._last_loop_wants_more is True)
         c.check("★ 引擎记录了完整调用（移交要带走）",
@@ -722,11 +732,11 @@ nodes:
         finally:
             handoff.build_resume_yaml = _orig_build8
 
-        # ⑦ ★★ 执行失败时**如实回退**，且措辞是"未能启动"而不是"已转入"
+        # ⑦ ★★ 执行失败时**如实回退**，且措辞是"没有转入任务模式"而不是"已转入"
         _note8 = handoff.partial_notice(
             inputs, handoff_ok=False, handoff_msg="生成的工作流未通过静态校验")
-        c.check("★★★ 失败时措辞是「未能启动」（不假装成功）",
-                "未能启动" in _note8, _note8[-100:])
+        c.check("★★★ 失败时措辞是「没有转入任务模式」（不假装成功）",
+                "没有转入任务模式" in _note8, _note8[-100:])
         _note8b = handoff.partial_notice(
             inputs, handoff_ok=True, handoff_msg="run_id=abc")
         c.check("★★ 成功时措辞是「已尝试转入」并带 run_id",

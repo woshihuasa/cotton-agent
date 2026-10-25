@@ -53,8 +53,7 @@
 执行语义：拓扑排序 → ready batch → 批内并发（**matplotlib 渲染类强制串行**）、
 节点级重试（**仅幂等节点**）+ 指数退避、超时、`fail_fast`/`degrade`/`skip_if_optional` 失败策略、熔断。
 
-主链路与编排层之间由 **移交机制**（`core/handoff.py`）衔接：工具循环轮次撞墙时，
-把已跑过的调用打包交给编排层续跑。
+编排层通过命令 `/perception` 调用
 
 ### 分级网关与不确定性门控
 三道**正交**闸门，各管一件事：
@@ -227,7 +226,7 @@ cotton_agent/
 ├── updater_runner.py          # 自动更新安装器
 ├── cotton_agent.spec / updater.spec
 ├── core/
-│   ├── rag_engine.py          # RAG 引擎（消息组装 / 工具循环 / L1~L4 编排 / 移交）
+│   ├── rag_engine.py          # RAG 引擎（消息组装 / 工具循环 / L1~L4 编排）
 │   ├── knowledge_base.py      # 向量库 / 增量索引 / 检索与 Rerank
 │   ├── kb_builder.py          # 文档指纹 / 同步规划 / 全量重建
 │   ├── user_memory.py         # L4 容器读写（画像库 + 项目事实库 + L3 摘要）
@@ -240,7 +239,7 @@ cotton_agent/
 │   ├── prompt_layers.py       # 提示分层与稳定前缀指纹（缓存可测量）
 │   ├── providers.py           # 模型服务商登记表（唯一真相）
 │   ├── credentials.py         # 凭据层（独立文件 + 只写接口）
-│   ├── handoff.py             # 主链路 → 编排层移交
+│   ├── handoff.py             # 未完成任务的「部分结果」提示（移交机制已停用）
 │   ├── task_runner.py         # 后台线程跑工作流（不阻塞对话）
 │   ├── trajectory.py          # 轨迹录制与 ShareGPT 导出
 │   ├── orchestration/         # 工作流引擎：model / loader / catalog / validator / engine / store / gates
