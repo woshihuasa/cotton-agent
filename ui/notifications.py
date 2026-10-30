@@ -388,6 +388,11 @@ class NotificationDrawer(QFrame):
             w = self._items.takeAt(0)
             wid = w.widget()
             if wid is not None:
+                # ★ 必须先 `setParent(None)` 再 `deleteLater()`：
+                #   `deleteLater()` 只是排进事件队列，在循环处理之前旧的控件
+                #   仍然是父控件的可见子控件，会留在**原来的位置继续绘制**。
+                #   主窗口里每次刷新都重建列表，于是同一屏上出现了两份文字叠在一起。
+                wid.setParent(None)
                 wid.deleteLater()
 
         rows = list(items)

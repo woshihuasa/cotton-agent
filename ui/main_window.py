@@ -7,6 +7,7 @@
 from PyQt6.QtCore import (
     QEasingCurve,
     QEvent,
+    QParallelAnimationGroup,
     QPoint,
     QPropertyAnimation,
     QRectF,
@@ -56,7 +57,14 @@ from core.llm_client import (DEFAULT_REASONING_EFFORT,
                             REASONING_EFFORT_LEVELS)
 from core.kb_builder import plan_sync, rebuild_knowledge_base, sync_knowledge_base, verify_embedding
 from core.knowledge_base import KnowledgeBase
+from core.notifications import NotificationStore
 from core.rag_engine import RAGEngine
+from ui.notifications import (
+    NOTIFY_STYLE,
+    NotificationButton,
+    NotificationDrawer,
+    drawer_width_for,
+)
 from ui.settings_dialog import SettingsDialog
 from ui.sidebar import SideBar
 
@@ -1278,9 +1286,9 @@ class CottonAgentWindow(QMainWindow):
     #: 定时触发层的消息（`core/schedule.py`）。
     #:
     #: ★ 它来自**后台线程**（调度线程等任务跑完的那个），而 Qt 控件只能在主线程碰。
-    #:   所以调度层只发一个字符串，经这个信号排队转到主线程再建气泡 ——
-    #:   直接在后台线程里 `_add_bubble()` 会让程序偶发崩溃且难以复现。
-    schedule_notice = pyqtSignal(str)
+    #:   所以调度层只发一个 dict，经这个信号排队转到主线程再动界面 ——
+    #:   直接在后台线程里建气泡会让程序偶发崩溃且难以复现。
+    schedule_push = pyqtSignal(dict)
 
     def __init__(self) -> None:
         super().__init__()
@@ -1311,10 +1319,14 @@ class CottonAgentWindow(QMainWindow):
         if not self._engine.current_session_id:
             self._engine.create_session()
 
+        # 收件箱要在建界面之前就绪：`_init_ui` 里的角标与抽屉第一次刷新要读它
+        self._notify_store = NotificationStore()
+
         self._init_ui()
         self._apply_styles()
         self._refresh_sidebar()
         self._load_history()
+        self._refresh_notifications()
 
         # 延迟启动知识库自动检测（窗口先显示，避免启动阻塞）
         QTimer.singleShot(300, self._ensure_knowledge_base)
@@ -1324,7 +1336,7 @@ class CottonAgentWindow(QMainWindow):
         # ★ 排在知识库检测之后：调度要用知识库，得先让它有机会准备好；
         #   而知识库是惰性取的（`kb_provider`），所以这时刻只是"大概率已就绪"。
         self._scheduler = None
-        self.schedule_notice.connect(self._on_schedule_notice)
+        self.schedule_push.connect(self._on_schedule_notice)
         QTimer.singleShot(5000, self._start_scheduler)
 
         # 更新下载完成后退出时拉起 updater.exe
@@ -1420,31 +1432,105 @@ class CottonAgentWindow(QMainWindow):
         print(f"[Schedule] 已启动 {len(self._scheduler.jobs)} 个触发项")
 
     def _on_schedule_event(self, payload: dict) -> None:
-        """调度层回调（**后台线程**）—— 这里只做格式化，界面交给信号。"""
+        """调度层回调（**后台线程**）—— 只转成信号，界面的事交给主线程。
+
+        ★ 这里**不能**碰任何控件（也不能格式化后塞进聊天区）：
+          它跑在调度线程或 `_watch` 线程里，直接动 QLabel 会偶发崩溃。
+        """
         if not isinstance(payload, dict):
             return
+        self.schedule_push.emit(payload)
+
+    def _on_schedule_notice(self, payload: dict) -> None:
+        """收到调度消息（**主线程**）：推送进收件箱，其余进状态栏。
+
+        ★ 推送**不再进聊天区**。它是客户端级的，进了对话就等于绑死在当前会话上：
+          换会话看不到、被 L2 压缩压掉、空会话里还会触发标题生成。
+        """
         kind = str(payload.get("type") or "")
         text = str(payload.get("text") or "").strip()
         if not text:
             return
-        if kind == "notice":
-            from datetime import datetime as _dt
-            title = str(payload.get("title") or payload.get("job") or "定时任务")
-            head = f"**{title}**　{_dt.now():%Y-%m-%d %H:%M}"
-            path = str(payload.get("path") or "")
-            body = text + (f"\n\n存档：`{path}`" if path else "")
-            self.schedule_notice.emit(f"{head}\n\n{body}")
-        else:
-            # 失败 / 降级 / 跳过：如实说，不包装成「正常」
-            self.schedule_notice.emit(f"> 定时任务：{text}")
 
-    def _on_schedule_notice(self, text: str) -> None:
-        """收到调度消息（主线程）：建一个气泡，并在状态栏留一句。"""
-        if not text.strip():
+        if kind != "notice":
+            # 失败 / 降级 / 跳过：如实写在状态栏，不包装成「正常」。
+            # 这类消息由触发层按「不消费计划时刻」重试，不该每天刷一屏气泡。
+            self._set_status(f"定时任务：{text}")
             return
-        self._add_bubble(text, is_user=False)
-        self._set_status("定时任务有新内容")
-        QTimer.singleShot(0, self._scroll_to_bottom)
+
+        try:
+            self._notify_store.add(
+                job_id=str(payload.get("job") or ""),
+                title=str(payload.get("title") or ""),
+                body=text,
+                path=str(payload.get("path") or ""),
+            )
+        except ValueError as e:
+            log.warning("推送没能落进收件箱：%s", e)
+            self._set_status("收到一条推送，但落库失败（详见日志）")
+            return
+
+        self._refresh_notifications()
+        self._set_status("收到一条新推送")
+
+    # ── 通知中心：角标、抽屉、已读 ─────────────────────────
+
+    def _refresh_notifications(self) -> None:
+        """按收件箱的当前状态刷新角标与抽屉内容。"""
+        self._notify_btn.set_unread(self._notify_store.unread_count())
+        self._notify_drawer.set_items(self._notify_store.items())
+
+    def _toggle_notify_drawer(self) -> None:
+        if self._notify_open:
+            self._close_notify_drawer()
+        else:
+            self._open_notify_drawer()
+
+    def _open_notify_drawer(self) -> None:
+        """展开抽屉。**打开即全部已读**（已定的口径）。"""
+        if self._notify_open:
+            return
+        self._notify_open = True
+        self._notify_drawer.setVisible(True)
+        self._refresh_notifications()
+        if self._notify_store.mark_all_read():
+            self._notify_btn.set_unread(self._notify_store.unread_count())
+        self._animate_notify(0, drawer_width_for(self.height()))
+
+    def _close_notify_drawer(self) -> None:
+        if not self._notify_open:
+            return
+        self._notify_open = False
+        self._animate_notify(self._notify_drawer.width(), 0)
+
+    def _animate_notify(self, start: int, end: int) -> None:
+        """同时动 `minimumWidth` 与 `maximumWidth`。
+
+        ★ 只动 `maximumWidth` 拉不宽：抽屉的 `sizeHint` 比目标宽度小，
+          布局按 `sizeHint` 给宽度，上限放宽了也不会变（实测只到 170）。
+          把 min 与 max 一起推到同一个值，宽度才真的跟动画走。
+        """
+        self._notify_anim.stop()
+        for anim in (self._notify_anim_w, self._notify_anim_n):
+            anim.setStartValue(int(start))
+            anim.setEndValue(int(end))
+        self._notify_anim.start()
+
+    def _on_notify_anim_finished(self) -> None:
+        """收起动画结束后隐藏抽屉，免得它继续占着布局的焦点与命中区域。"""
+        if not self._notify_open and self._notify_drawer.maximumWidth() <= 0:
+            self._notify_drawer.setVisible(False)
+
+    def _mark_all_notified(self) -> None:
+        """「全部已读」：清掉未读角标。"""
+        self._notify_store.mark_all_read()
+        self._refresh_notifications()
+
+    def resizeEvent(self, event) -> None:                     # noqa: N802
+        """窗口尺寸变化时，抽屉宽度按 9:16 重算（只在展开状态下）。"""
+        super().resizeEvent(event)
+        if getattr(self, "_notify_open", False):
+            self._notify_drawer.setMaximumWidth(drawer_width_for(self.height()))
 
     # ── 软件更新检查与安装 ──────────────────────────────
 
@@ -1534,7 +1620,7 @@ class CottonAgentWindow(QMainWindow):
         self.setStyleSheet(
             MAIN_STYLE + SCROLL_AREA_STYLE + BUBBLE_STYLE + THINKING_PANEL_STYLE
             + INPUT_FRAME_STYLE + INPUT_EDIT_STYLE + SUBMIT_BTN_STYLE
-            + TOGGLE_BTN_STYLE + CONTROL_STYLE
+            + TOGGLE_BTN_STYLE + CONTROL_STYLE + NOTIFY_STYLE
         )
 
     # ── UI 构建 ──────────────────────────────────────────
@@ -1589,6 +1675,11 @@ class CottonAgentWindow(QMainWindow):
         self._toggle_btn.clicked.connect(self._toggle_sidebar)
         toolbar.addWidget(self._toggle_btn)
         toolbar.addStretch()
+
+        # ── 右侧通知入口：角标显示未读数 ──
+        self._notify_btn = NotificationButton()
+        self._notify_btn.clicked.connect(self._toggle_notify_drawer)
+        toolbar.addWidget(self._notify_btn)
         chat_layout.addLayout(toolbar)
 
         # ── 对话气泡区 ──
@@ -1731,6 +1822,31 @@ class CottonAgentWindow(QMainWindow):
         frame_layout.addLayout(input_toolbar)
 
         root_layout.addWidget(chat_container, stretch=1)
+
+        # ── 右侧通知抽屉（默认收起，宽度动画与左边栏同一套做法）──
+        #
+        # ★ 为什么让它**参与布局**而不是浮在上面：浮层会盖住工具栏右端的入口按钮，
+        #   于是"再点一次收起"就点不到了。参与布局的代价是聊天区会跟着窄一点，
+        #   但这正是左边栏一直以来的行为，两者一致。
+        self._notify_drawer = NotificationDrawer()
+        self._notify_drawer.setMaximumWidth(0)
+        self._notify_drawer.setMinimumWidth(0)
+        self._notify_drawer.setVisible(False)
+        self._notify_drawer.closed.connect(self._close_notify_drawer)
+        self._notify_drawer.all_read_requested.connect(self._mark_all_notified)
+        # ★ 存档链接走同一个白名单校验，不另开一条打开文件的路
+        self._notify_drawer.archive_requested.connect(self._on_link_clicked)
+        root_layout.addWidget(self._notify_drawer)
+
+        self._notify_anim = QParallelAnimationGroup(self)
+        self._notify_anim_w = QPropertyAnimation(self._notify_drawer, b"maximumWidth")
+        self._notify_anim_n = QPropertyAnimation(self._notify_drawer, b"minimumWidth")
+        for _a in (self._notify_anim_w, self._notify_anim_n):
+            _a.setDuration(180)
+            _a.setEasingCurve(QEasingCurve.Type.InOutCubic)
+            self._notify_anim.addAnimation(_a)
+        self._notify_anim.finished.connect(self._on_notify_anim_finished)
+        self._notify_open = False
 
         # 侧边栏动画
         self._sidebar_anim = QPropertyAnimation(self._sidebar, b"maximumWidth")
