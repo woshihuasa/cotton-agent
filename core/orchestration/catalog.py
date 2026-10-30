@@ -224,6 +224,13 @@ def _builtin_specs() -> list[NodeSpec]:
             params=(
                 ParamSpec("prompt_ref", "string", True),
                 ParamSpec("inputs", "array", False),
+                # ★ 2026-10-30 补：执行器 `_exec_llm` **强制要求** output_schema
+                #   （没有契约就判失败），而这里原先没声明 —— 于是按本目录写的
+                #   `llm.summarize` 节点**必然跑不起来**：不写被校验器拦成未知参数，
+                #   写了又通过校验、运行时才报「缺少 output_schema」。
+                #   契约必须包含执行器的硬要求，否则就是两份地图。
+                ParamSpec("output_schema", "object", True,
+                          description="输出契约（必须有；下游靠它取字段）"),
             ),
             side_effect=SideEffect.NETWORK,
             source="core/orchestration/catalog.py",

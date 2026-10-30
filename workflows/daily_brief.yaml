@@ -1,0 +1,46 @@
+# 每日农情简报 —— 由触发层在每天固定时刻拉起（`core/schedule.py`）
+#
+# 【为什么是一条工作流，而不是一段写死的代码】
+#   它和三件事共用同一套机制：YAML 是可 review 的权威定义、节点级失败策略、
+#   断点续跑。把「每天发什么」写成流程，改口径不用改代码。
+#
+# 【口径】只依据天气实况与知识库摘录，不由模型自由发挥 ——
+#   提示词里已写明「资料里没写的就不要写」（`prompts/daily_brief.md`）。
+id: daily_brief
+version: 1
+description: 当天天气 → 知识库农事要点 → 一段能照做的田间建议
+
+inputs:
+  city:   { type: string, required: true,  description: 城市名（高德口径），如 阿克苏 }
+  region: { type: string, required: true,  description: 地区名，用于检索农事要点 }
+  today:  { type: string, required: false, description: 触发日期（触发层注入） }
+
+nodes:
+  # ① 天气实况。工具返回中文文本，下游按 {{weather.text}} 引用
+  - id: weather
+    type: tool.get_weather
+    params:
+      city: "{{city}}"
+      date: today
+    side_effect: network
+
+  # ② 农事要点。只读本地向量库，所以副作用是 none
+  - id: tips
+    type: data.kb_query
+    params:
+      query: "{{region}} 棉花 田间管理 水肥调控 病虫害防治"
+      top_k: 4
+    side_effect: none
+
+  # ③ 成文。★ 必须给 output_schema —— 下游（推送层）要靠 title/body 取文字
+  - id: brief
+    type: llm.summarize
+    params:
+      prompt_ref: prompts/daily_brief.md
+      inputs: [weather, tips]
+      output_schema:
+        title: string
+        body: string
+        actions: array
+    side_effect: network
+    needs: [weather, tips]

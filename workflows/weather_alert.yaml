@@ -1,0 +1,38 @@
+# 极端天气预警 —— 规则命中后由触发层拉起（`core/schedule.py`）
+#
+# 【为什么判定不在这条工作流里】
+#   判定只需要天气接口的一次返回，用代码写更直接：纯函数、可单测、不需要模型。
+#   工作流负责的是**有了信号之后怎么把话说清楚**，这一段才需要模型。
+#   两者分开还有一个好处：判定出错不会花钱，成文出错不会重复报警。
+#
+# 【alarm 从哪来】触发层把命中的规则与读数拼成一段文字传进来，
+#   提示词里用 {{alarm}} 引用（`core/orchestration/engine.py::_exec_llm` 负责替换）。
+id: weather_alert
+version: 1
+description: 规则命中 → 次日预报 → 一段提前处置建议
+
+inputs:
+  city:   { type: string, required: true,  description: 城市名（高德口径） }
+  region: { type: string, required: true,  description: 地区名 }
+  alarm:  { type: string, required: true,  description: 命中的规则与读数（触发层给出） }
+
+nodes:
+  # ① 次日预报。再取一次是为了让报告里带着原始读数，而不是只信传进来的结论
+  - id: weather
+    type: tool.get_weather
+    params:
+      city: "{{city}}"
+      date: tomorrow
+    side_effect: network
+
+  # ② 成文
+  - id: advice
+    type: llm.summarize
+    params:
+      prompt_ref: prompts/weather_alert.md
+      inputs: [weather]
+      output_schema:
+        title: string
+        body: string
+    side_effect: network
+    needs: [weather]

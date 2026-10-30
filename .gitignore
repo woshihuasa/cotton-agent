@@ -74,6 +74,11 @@ tests/eval_fixtures/
 # 编排层：只忽略**运行态**；workflows/*.yaml 是权威定义，必须进 git（决策 3a）
 workflows/runs/
 
+# 定时触发层：配置与运行状态都属于**本机运行态**（出厂配置由代码里的
+# `schedule.default_jobs()` 给出，首次运行自动落盘），不进版本控制。
+# ★ 放在根目录而不是 workflows/ 下 —— 打包脚本会把整个 workflows/ 收进安装包。
+/schedule/
+
 # ── 测试临时数据目录（COTTON_AGENT_DATA_DIR 隔离用）──
 cotton_test_*/
 /tmp*/

@@ -1253,6 +1253,13 @@ class CottonAgentWindow(QMainWindow):
     布局：左 SideBar | 右 (聊天区 + 输入框)
     """
 
+    #: 定时触发层的消息（`core/schedule.py`）。
+    #:
+    #: ★ 它来自**后台线程**（调度线程等任务跑完的那个），而 Qt 控件只能在主线程碰。
+    #:   所以调度层只发一个字符串，经这个信号排队转到主线程再建气泡 ——
+    #:   直接在后台线程里 `_add_bubble()` 会让程序偶发崩溃且难以复现。
+    schedule_notice = pyqtSignal(str)
+
     def __init__(self) -> None:
         super().__init__()
         # matplotlib 主线程预热：避免图表工具在 RAGWorker 线程首次渲染时崩溃（STATUS_IN_PAGE_ERROR）
@@ -1291,6 +1298,12 @@ class CottonAgentWindow(QMainWindow):
         QTimer.singleShot(300, self._ensure_knowledge_base)
         # 延迟启动更新检查
         QTimer.singleShot(2000, self._check_for_update)
+        # 定时触发层（每日农情 / 极端天气预警）。
+        # ★ 排在知识库检测之后：调度要用知识库，得先让它有机会准备好；
+        #   而知识库是惰性取的（`kb_provider`），所以这时刻只是"大概率已就绪"。
+        self._scheduler = None
+        self.schedule_notice.connect(self._on_schedule_notice)
+        QTimer.singleShot(5000, self._start_scheduler)
 
         # 更新下载完成后退出时拉起 updater.exe
         app = QApplication.instance()
@@ -1357,6 +1370,59 @@ class CottonAgentWindow(QMainWindow):
                 f"{msg}\n\n已降级为数据工具问答模式，产量/价格/图表等本地工具仍可用。"
                 "修复配置后重启应用将自动重试。",
             )
+
+    # ── 定时触发层：每日农情 / 极端天气预警 ─────────────────
+
+    def _start_scheduler(self) -> None:
+        """启动 `core/schedule.py` 的调度线程。
+
+        ★ 失败只打日志、不弹窗：一个跑不起来的定时任务不该妨碍用户问问题。
+        """
+        if self._scheduler is not None:
+            return
+        from core import schedule as sched
+        try:
+            self._scheduler = sched.Scheduler(
+                # 惰性取知识库：启动那一刻库可能还在同步，取到的 None 会被
+                # 记成「库不可用」，那是一次假失败。
+                kb_provider=lambda: getattr(self._engine, "kb", None),
+                on_event=self._on_schedule_event,
+            )
+            self._scheduler.start()
+        except Exception as e:                                # noqa: BLE001
+            print(f"[Schedule] 启动失败（不影响对话）: {e}")
+            log.warning("定时触发层启动失败: %s", e)
+            self._scheduler = None
+            return
+        log.info("定时触发层已启动：%s", [j.id for j in self._scheduler.jobs])
+        print(f"[Schedule] 已启动 {len(self._scheduler.jobs)} 个触发项")
+
+    def _on_schedule_event(self, payload: dict) -> None:
+        """调度层回调（**后台线程**）—— 这里只做格式化，界面交给信号。"""
+        if not isinstance(payload, dict):
+            return
+        kind = str(payload.get("type") or "")
+        text = str(payload.get("text") or "").strip()
+        if not text:
+            return
+        if kind == "notice":
+            from datetime import datetime as _dt
+            title = str(payload.get("title") or payload.get("job") or "定时任务")
+            head = f"**{title}**　{_dt.now():%Y-%m-%d %H:%M}"
+            path = str(payload.get("path") or "")
+            body = text + (f"\n\n存档：`{path}`" if path else "")
+            self.schedule_notice.emit(f"{head}\n\n{body}")
+        else:
+            # 失败 / 降级 / 跳过：如实说，不包装成「正常」
+            self.schedule_notice.emit(f"> 定时任务：{text}")
+
+    def _on_schedule_notice(self, text: str) -> None:
+        """收到调度消息（主线程）：建一个气泡，并在状态栏留一句。"""
+        if not text.strip():
+            return
+        self._add_bubble(text, is_user=False)
+        self._set_status("定时任务有新内容")
+        QTimer.singleShot(0, self._scroll_to_bottom)
 
     # ── 软件更新检查与安装 ──────────────────────────────
 
@@ -2166,6 +2232,12 @@ class CottonAgentWindow(QMainWindow):
     # ── 窗口关闭 ─────────────────────────────────────────
 
     def closeEvent(self, event) -> None:
-        """关闭前停止定时器。"""
+        """关闭前停止定时器与调度线程。"""
         self._update_timer.stop()
+        sched = getattr(self, "_scheduler", None)
+        if sched is not None:
+            try:
+                sched.stop()
+            except Exception:                                # noqa: BLE001
+                pass
         super().closeEvent(event)
