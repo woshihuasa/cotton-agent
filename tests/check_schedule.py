@@ -92,13 +92,26 @@ class Checker:
 
 
 class _Step:
-    def __init__(self, output) -> None:
+    def __init__(self, output=None, error: str = "") -> None:
         self.output = output
+        self.error = error
 
 
 class _Run:
-    def __init__(self, outputs: dict) -> None:
+    def __init__(self, outputs: dict, *, state=None) -> None:
         self.steps = {k: _Step(v) for k, v in outputs.items()}
+        self.state = state
+
+
+class _FailedRun:
+    """跑到一半失败的那种 Run：`state` 不是 DONE，某个节点带 error。"""
+
+    def __init__(self, error: str) -> None:
+        self.state = orch_engine.StepState.FAILED
+        self.steps = {
+            "weather": _Step({"text": "晴"}),
+            "brief": _Step(None, error),
+        }
 
 
 class _Handle:
@@ -123,6 +136,17 @@ class _Runner:
 
     def wait(self, run_id, timeout=None):
         return None if self._outputs is None else _Run(self._outputs)
+
+
+class _FailedRunner(_Runner):
+    """`wait()` 总是返回一个失败的 Run（模拟工作流跑失败）。"""
+
+    def __init__(self, run) -> None:
+        super().__init__(None)
+        self._run = run
+
+    def wait(self, run_id, timeout=None):
+        return self._run
 
 
 class _FlakyRunner(_Runner):
@@ -545,8 +569,98 @@ def section_consume(c: Checker) -> None:
             sched4.tick(datetime(2026, 10, 30, 20, 30)) == [])
 
 
+def section_failure(c: Checker) -> None:
+    c.section("第 6 节：★ 失败要说清是哪儿失败（别把人引到没问题的地方去改）")
+
+    from core import providers
+
+    job = S.default_jobs()[0]
+    t = datetime(2026, 10, 30, 8, 30)
+    orig = providers.default_client
+
+    # ── ① 模型根本没配：预检拦住，不提交、不消费、只提示一次 ──
+    _isolate()
+    events: list = []
+    runner = _Runner({"brief": {"body": "x"}})
+    sched = S.Scheduler(runner=runner, kb_provider=lambda: {},
+                        fetcher=lambda city, when: WEATHER_TOMORROW,
+                        on_event=events.append)
+    sched.load()
+    sched.jobs = [job]
+
+    def _no_key(**kw):
+        raise RuntimeError("没有可用密钥")
+
+    providers.default_client = _no_key
+    try:
+        fired = sched.tick(t)
+        sched.tick(t + timedelta(seconds=30))
+    finally:
+        providers.default_client = orig
+
+    c.check("模型没配 → 不提交给执行器", fired == [] and runner.submitted == [],
+            str(runner.submitted))
+    c.check("★ 模型没配不消费计划时刻（配好之后当天还能补）",
+            sched.state_of(job.id).last_fired == "",
+            repr(sched.state_of(job.id).last_fired))
+    told = [e for e in events if "模型" in str(e.get("text", ""))]
+    c.check("★ 提示只有一条（不消费也不能刷屏）", len(told) == 1,
+            str([e.get("text") for e in events]))
+    c.check("★ 提示说的是模型配置，而不是「没取到文字」",
+            bool(told) and "没取到" not in str(told[0].get("text")),
+            str(told[0].get("text") if told else None))
+
+    # 配好之后同一个时刻能补跑
+    providers.default_client = lambda **kw: object()
+    try:
+        c.check("★ 模型恢复后，同一个计划时刻能补跑",
+                sched.tick(t + timedelta(minutes=1)) == [job.id],
+                str(runner.submitted))
+    finally:
+        providers.default_client = orig
+    _drain(sched)
+
+    # ── ② 跑了但失败：报失败节点自己的 error ──
+    _isolate()
+    events2: list = []
+    providers.default_client = lambda **kw: object()
+    try:
+        sched2 = S.Scheduler(
+            runner=_FailedRunner(_FailedRun("RuntimeError: 没有可用密钥")),
+            kb_provider=lambda: {},
+            fetcher=lambda city, when: WEATHER_TOMORROW,
+            on_event=events2.append)
+        sched2.load()
+        sched2.jobs = [job]
+        fired2 = sched2.tick(t)
+    finally:
+        providers.default_client = orig
+    _wait_for(lambda: any(e.get("type") == "failed" for e in events2))
+    fail = next((e for e in events2 if e.get("type") == "failed"), {})
+    c.check("工作流失败时仍然提交并进入回收", fired2 == [job.id], str(fired2))
+    c.check("★ 报的是失败节点自己的错误原文",
+            "没有可用密钥" in str(fail.get("text")), str(fail.get("text")))
+    c.check("★ 不再把失败说成「没取到要推送的文字」",
+            "没取到" not in str(fail.get("text")), str(fail.get("text")))
+    c.check("状态里带着结束状态，便于排查",
+            "FAILED" in sched2.state_of(job.id).last_note,
+            sched2.state_of(job.id).last_note)
+
+    # ── ③ 取错的节点：`_first_error` 按流程顺序取第一条 ──
+    c.check("_first_error 返回第一条节点错误",
+            S._first_error(_FailedRun("第一处")) == "第一处")
+    c.check("_first_error 在没有错误时返回空串",
+            S._first_error(_Run({})) == "")
+    c.check("_first_error 对没有 steps 的对象也不抛",
+            S._first_error(object()) == "")
+
+    # ── ④ 反向：不带 `state` 的旧式 Run 仍然走「取文字」那条路 ──
+    c.check("★ 反向验证：Run 没有 state 时不误判为失败",
+            S.extract_notice(_Run({"brief": {"body": "正文"}}), "brief") == "正文")
+
+
 def section_deliver(c: Checker) -> None:
-    c.section("第 6 节：取文字与推送（取不到就说取不到）")
+    c.section("第 7 节：取文字与推送（取不到就说取不到）")
 
     job = S.default_jobs()[0]
     sched, _runner, events = _fresh(
@@ -590,7 +704,7 @@ def section_deliver(c: Checker) -> None:
 
 
 def section_alarm(c: Checker) -> None:
-    c.section("第 7 节：预警的静默期（同一条不会一天内反复推）")
+    c.section("第 8 节：预警的静默期（同一条不会一天内反复推）")
 
     watch = S.default_jobs()[1]
     sched, runner, events = _fresh(
@@ -628,7 +742,7 @@ def section_alarm(c: Checker) -> None:
 
 
 def section_contracts(c: Checker) -> None:
-    c.section("第 8 节：工作流与节点契约（两处登记必须一致）")
+    c.section("第 9 节：工作流与节点契约（两处登记必须一致）")
 
     for name in ("daily_brief.yaml", "weather_alert.yaml"):
         path = ROOT / "workflows" / name
@@ -689,7 +803,7 @@ def section_contracts(c: Checker) -> None:
 
 
 def section_pure(c: Checker) -> None:
-    c.section("第 9 节：★ 触发层不依赖界面（否则测试与命令行都用不了）")
+    c.section("第 10 节：★ 触发层不依赖界面（否则测试与命令行都用不了）")
 
     src = (ROOT / "core" / "schedule.py").read_text(encoding="utf-8")
     tree = ast.parse(src)
@@ -712,7 +826,7 @@ def section_pure(c: Checker) -> None:
     for node in ast.walk(ast.parse(fake)):
         if isinstance(node, ast.Import):
             mods2 |= {a.name.split(".")[0] for a in node.names}
-    c.check("★ 反向验证：塞入 PyQt 导入 → 第 9 节必须报警", "PyQt6" in mods2)
+    c.check("★ 反向验证：塞入 PyQt 导入 → 第 10 节必须报警", "PyQt6" in mods2)
 
     # 对外接口：状态摘要与手动运行
     sched_b, runner_b, _ = _fresh(None, outputs={"brief": {"body": "x"}})
@@ -752,6 +866,7 @@ def main() -> int:
         section_config(c)
         section_fire_once(c)
         section_consume(c)
+        section_failure(c)
         section_deliver(c)
         section_alarm(c)
         section_contracts(c)

@@ -905,6 +905,25 @@ class Scheduler:
                 return ""
             inputs["__kb__"] = kb
 
+        # ★ 模型预检：工作流里只要有 `llm.*` 节点，就先确认客户端能构造出来。
+        #   缺 Key 时 `providers.default_client()` 在**构造阶段**就抛（包括未设
+        #   `LLM_PROVIDER` 时 `OpenAI(...)` 因空 Key 抛的那种），不花一次请求。
+        #
+        #   它拦的是「根本没配」，拦不住「配了但额度用完 / 网络不通 / 输出不符合
+        #   契约」—— 那三种由 `_watch()` 看 `run.state` 报。两段各管一段，不重复。
+        if any(n.type.startswith("llm.") for n in wf.nodes):
+            problem = self._model_problem()
+            if problem:
+                changed = self._record(
+                    job, self.state_of(job.id), "skipped", scheduled,
+                    note="模型不可用：" + problem, consume=False)
+                if changed:
+                    self._emit({"type": "skipped", "job": job.id, "text":
+                                f"「{job.title or job.id}」要用模型，但当前没有可用配置："
+                                f"{problem}。配好之后当天会补上（{job.grace_min} 分钟"
+                                f"窗口内会重试）。"})
+                return ""
+
         try:
             handle = self._get_runner().submit_workflow(wf, inputs)
         except Exception as e:                                # noqa: BLE001
@@ -978,6 +997,23 @@ class Scheduler:
                         "text": f"「{job.title or job.id}」没有跑完：{st.last_note}"})
             return
 
+        # ★ 先看**工作流成没成**，再看能不能取到文字。
+        #   第一版只看后者，于是模型没配、节点失败时，用户收到的是
+        #   「跑完了，但没取到要推送的文字 —— 检查 notice 配置」：
+        #   三处都说错（没跑完、不是取文字的问题、notice 配置是对的），
+        #   把人指向一个本来就没毛病的地方。真正的原因在 run 里躺着没人读。
+        state_name = str(getattr(getattr(run, "state", None), "name", "") or "").strip()
+        if state_name and state_name != "DONE":
+            reason = _first_error(run) or "没有可用的节点错误"
+            st.last_status = "failed"
+            st.last_note = f"工作流结束状态 {state_name}：{reason}"
+            self._dirty = True
+            self.save_state()
+            self._emit({"type": "failed", "job": job.id, "run_id": run_id,
+                        "text": f"「{job.title or job.id}」没有生成内容（{state_name}）："
+                                f"{reason}"})
+            return
+
         text = extract_notice(run, job.notice_node, job.notice_field)
         if not text:
             st.last_status = "failed"
@@ -1034,6 +1070,20 @@ class Scheduler:
         except Exception as e:                                # noqa: BLE001
             log.warning("取知识库失败：%s", e)
             return None
+
+    @staticmethod
+    def _model_problem() -> str:
+        """能不能构造出默认模型客户端。空串表示可以。
+
+        ★ 只构造、不调用：成本是零，也不依赖网络。它回答的问题是
+          「Key 配齐了没有」，不是「Key 还有没有额度」。
+        """
+        try:
+            from core import providers
+            providers.default_client()
+            return ""
+        except Exception as e:                                # noqa: BLE001
+            return f"{type(e).__name__}: {e}"
 
     def _fetch(self, city: str, when: str) -> str:
         """取天气原文。默认走真实工具，测试注入假实现。"""
@@ -1172,6 +1222,21 @@ class Scheduler:
         except Exception:                                    # noqa: BLE001
             # ★ 回调抛异常不能弄死调度线程（与 `core/task_runner.py` 同一条纪律）
             log.exception("调度事件回调异常")
+
+
+def _first_error(run: Any) -> str:
+    """取第一条节点错误（**按节点在流程里的顺序**，不是随便挑一条）。
+
+    ★ 为什么要按顺序：`{"brief": "模型没配", "report": "写盘失败"}` 这种情形，
+      真正的原因是前者；随机挑一条会把人引到次要问题上。
+    """
+    steps = getattr(run, "steps", None) or {}
+    values = steps.values() if hasattr(steps, "values") else []
+    for step in values:
+        err = str(getattr(step, "error", "") or "").strip()
+        if err:
+            return err
+    return ""
 
 
 def extract_notice(run: Any, node_id: str, field_name: str = "body") -> str:
