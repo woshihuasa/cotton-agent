@@ -400,7 +400,15 @@ class Job:
 
 
 def _job_from_dict(raw: Any) -> Job | None:
-    """容错解析。**字段缺失取保守默认**，读不懂的整条丢掉（宁可少一条任务）。"""
+    """容错解析。**字段缺失取保守默认**，读不懂的整条丢掉（宁可少一条任务）。
+
+    ★ 「整条丢掉」这句话是**承诺**，不是修辞：`schedule.json` 是给人手改的，
+      一个字段写错不该让其余任务跟着停摆。所以每个可能抛的转换都在这里兜住。
+      第一版漏了 `every_min` —— 它在 `Trigger(...)` 的构造参数里，没有 try，
+      写一个 `"每3小时"` 就让整份配置加载失败（`load()` 里 `self.jobs` 永远
+      赋不上值），且界面上一个字都看不到，只有每 30 秒一条日志。
+      `tests/check_schedule.py` 第 3 节把三类坏值都钉住了。
+    """
     if not isinstance(raw, dict):
         return None
     trig_raw = raw.get("trigger") or {}
@@ -414,7 +422,17 @@ def _job_from_dict(raw: Any) -> Job | None:
     notice = raw.get("notice") or {}
     if not isinstance(notice, dict):
         notice = {}
-    rules = [r for r in (_rule_from_dict(x) for x in (raw.get("rules") or [])) if r]
+    inputs_raw = raw.get("inputs")
+    # ★ `dict()` 同样会抛（传进来一个长度不齐的列表就会 ValueError），
+    #   所以它也必须在 try 里，而不是直接写在构造参数里。
+    try:
+        inputs = dict(inputs_raw or {})
+    except (TypeError, ValueError):
+        inputs = {}
+    rules_raw = raw.get("rules")
+    if not isinstance(rules_raw, list):
+        rules_raw = []
+    rules = [r for r in (_rule_from_dict(x) for x in rules_raw) if r]
     try:
         grace = int(raw.get("grace_min", DEFAULT_GRACE_MIN))
     except (TypeError, ValueError):
@@ -423,6 +441,15 @@ def _job_from_dict(raw: Any) -> Job | None:
         repeat = int(raw.get("repeat_min", DEFAULT_REPEAT_MIN))
     except (TypeError, ValueError):
         repeat = DEFAULT_REPEAT_MIN
+    try:
+        every_min = int(trig_raw.get("every_min") or 60)
+    except (TypeError, ValueError):
+        # ★ 退回 60 而不是丢掉整条：其余字段可能都是对的，而且这一条任务
+        #   仍然有意义。但必须留日志 —— 静默把「每 3 小时」变成「每 1 小时」
+        #   是那种「看起来在正常工作」的错误。
+        log.warning("trigger.every_min 不是数字（%r），已退回 60 分钟",
+                    trig_raw.get("every_min"))
+        every_min = 60
     return Job(
         id=str(raw.get("id") or "").strip(),
         title=str(raw.get("title") or ""),
@@ -432,10 +459,10 @@ def _job_from_dict(raw: Any) -> Job | None:
         trigger=Trigger(
             kind=str(trig_raw.get("kind") or "daily").strip(),
             at=str(trig_raw.get("at") or "08:00").strip(),
-            every_min=int(trig_raw.get("every_min") or 60),
+            every_min=every_min,
             weekdays=weekdays,
         ),
-        inputs=dict(raw.get("inputs") or {}),
+        inputs=inputs,
         grace_min=grace,
         repeat_min=repeat,
         rules=rules,
@@ -630,8 +657,23 @@ class Scheduler:
                 raw = {"jobs": []}
             if not isinstance(raw, dict):
                 raw = {"jobs": []}
-            for item in (raw.get("jobs") or []):
-                job = _job_from_dict(item)
+            items = raw.get("jobs")
+            if not isinstance(items, list):
+                # ★ 顶层形状不对就当没有任务。不能直接 for 一个 dict ——
+                #   那会拿键名当任务项，一条条解析成「什么都没有」。
+                log.warning("调度配置的 jobs 不是列表（%s），本轮不跑任何任务",
+                            type(items).__name__)
+                items = []
+            for item in items:
+                # ★ 这一层是最后一道网：`_job_from_dict` 已经把已知字段都兜住了，
+                #   但以后加字段还会再漏。单条解析失败只丢这一条，
+                #   绝不让整份配置作废 —— 那正是 F2 的前身。
+                try:
+                    job = _job_from_dict(item)
+                except Exception as e:                        # noqa: BLE001
+                    log.warning("调度任务配置解析失败，已跳过：%s: %s",
+                                type(e).__name__, e)
+                    continue
                 if job is not None:
                     jobs.append(job)
         else:

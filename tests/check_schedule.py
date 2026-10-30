@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import ast
+import json
 import os
 import shutil
 import sys
@@ -331,6 +332,73 @@ def section_config(c: Checker) -> None:
     sched2, runner2, _ = _fresh(off)
     c.check("enabled=False → 不触发", sched2.tick(datetime(2026, 10, 30, 9, 0)) == []
             and runner2.submitted == [])
+
+    # ------------------------------------------------------------------
+    # ★ 坏字段不该让整份配置作废：`schedule.json` 是给人手改的，
+    #   一个 `"every_min": "每3小时"` 曾让 load() 抛出、self.jobs 永远赋不上值，
+    #   于是两个任务一起停摆，界面上一个字都看不到。
+    # ------------------------------------------------------------------
+    _isolate()
+    raw_cfg = {
+        "jobs": [
+            {   # ① 写对的一条，必须活下来
+                "id": "daily_brief", "title": "每日农情简报",
+                "workflow": "daily_brief.yaml", "kind": "workflow", "enabled": True,
+                "trigger": {"kind": "daily", "at": "08:00"},
+                "inputs": {"city": "阿克苏", "region": "阿克苏地区"},
+                "notice": {"node": "brief", "field": "body"},
+            },
+            {   # ② every_min 写了中文单位
+                "id": "weather_watch", "title": "极端天气预警",
+                "workflow": "weather_alert.yaml", "kind": "weather_watch",
+                "trigger": {"kind": "interval", "every_min": "每3小时"},
+                "inputs": {"city": "阿克苏"},
+                "rules": [{"id": "大风", "field": "day_wind_power", "op": ">=",
+                           "value": 6}],
+                "notice": {"node": "advice"},
+            },
+            {   # ③ trigger 不是字典、inputs 是列表
+                "id": "broken", "workflow": "daily_brief.yaml",
+                "trigger": "不是字典", "inputs": [1, 2], "notice": {"node": "x"},
+            },
+            "干脆不是字典",        # ④ 条目本身就不对
+        ]
+    }
+    (S.schedule_dir() / "schedule.json").write_text(
+        json.dumps(raw_cfg, ensure_ascii=False), encoding="utf-8")
+    sched3 = S.Scheduler(fetcher=lambda city, when: "")
+    loaded, boom = True, ""
+    try:
+        sched3.load()
+    except Exception as e:                                    # noqa: BLE001
+        loaded, boom = False, f"{type(e).__name__}: {e}"
+    c.check("★ 一个坏字段不让 load() 抛出（整份配置不再作废）", loaded, boom)
+
+    ids = [j.id for j in sched3.jobs]
+    c.check("★ 写对的那条照常加载", "daily_brief" in ids, str(ids))
+    c.check("every_min 读不懂 → 退回 60 分钟，而不是丢掉整条任务",
+            any(j.id == "weather_watch" and j.trigger.every_min == 60
+                for j in sched3.jobs),
+            str([(j.id, j.trigger.every_min) for j in sched3.jobs]))
+    c.check("trigger 不是字典 → 按默认解析，不抛",
+            any(j.id == "broken" and j.trigger.kind == "daily" for j in sched3.jobs),
+            str(ids))
+    c.check("inputs 是列表 → 退回空映射，不抛",
+            any(j.id == "broken" and j.inputs == {} for j in sched3.jobs),
+            str([(j.id, j.inputs) for j in sched3.jobs]))
+    c.check("条目根本不是字典 → 整条丢掉",
+            len(sched3.jobs) == 3, f"实际加载 {len(sched3.jobs)} 条: {ids}")
+
+    # 反向：every_min 是数字时按原值生效（证明上面那条不是「永远退回 60」）
+    raw_cfg["jobs"][1]["trigger"]["every_min"] = 45
+    (S.schedule_dir() / "schedule.json").write_text(
+        json.dumps(raw_cfg, ensure_ascii=False), encoding="utf-8")
+    sched4 = S.Scheduler(fetcher=lambda city, when: "")
+    sched4.load()
+    c.check("★ 反向验证：every_min 是数字时按原值生效（不是恒退回 60）",
+            [j.trigger.every_min for j in sched4.jobs
+             if j.id == "weather_watch"] == [45],
+            str([(j.id, j.trigger.every_min) for j in sched4.jobs]))
 
 
 def section_fire_once(c: Checker) -> None:
