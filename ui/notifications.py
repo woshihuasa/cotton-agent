@@ -23,7 +23,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Sequence
 
-from PyQt6.QtCore import QRectF, QSize, Qt, pyqtSignal
+from PyQt6.QtCore import QRectF, QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap, QTransform
 from PyQt6.QtWidgets import (
     QApplication,
@@ -126,7 +126,34 @@ QPushButton#notifyLink {
 }
 QPushButton#notifyLink:hover { text-decoration: underline; }
 QLabel#notifyEmpty { font-size: 12px; color: #9A9A9E; }
+
+/* ── 启动浮窗 ──
+   ★ 它是主窗口的**子控件**，不是独立窗口：`Qt.Popup` 在 Windows 上会抢焦点，
+     用户正在输入框里打字时突然失焦很烦。 */
+QFrame#notifyToast {
+    background-color: #FFFFFF;
+    border: 1px solid #E3E3E6;
+    border-radius: 10px;
+}
+QLabel#toastTitle { font-size: 12px; font-weight: 600; color: #1f1f1f; }
+QLabel#toastSub   { font-size: 11px; color: #8A8A8E; }
+QPushButton#toastView {
+    background: transparent; border: none;
+    color: #1A73E8; font-size: 12px; padding: 0;
+}
+QPushButton#toastView:hover { text-decoration: underline; }
+QPushButton#toastDismiss {
+    background: transparent; border: none;
+    color: #8A8A8E; font-size: 12px; padding: 0;
+}
+QPushButton#toastDismiss:hover { color: #1f1f1f; }
 """
+
+#: 浮窗宽度
+TOAST_WIDTH = 300
+
+#: 浮窗自动收起时间（毫秒）
+TOAST_MS = 8000
 
 
 def drawer_width_for(height: int) -> int:
@@ -410,3 +437,106 @@ class NotificationDrawer(QFrame):
 
     def item_count(self) -> int:
         return self._count
+
+
+class NotificationToast(QFrame):
+    """启动/新消息时的一个小浮条：`有 N 条未读推送` + 最新一条标题 + 两个按钮。
+
+    【为什么是主窗口的子控件】独立窗口（`Qt.Popup` / `Qt.Tool`）在 Windows 上会
+    抢焦点，用户正在输入框里打字时突然失焦很烦；而且窗口一移动它不会跟。
+    做成子控件之后，`raise_()` 就能盖在聊天区上方，位置由父窗口算。
+
+    【位置】由调用方给：`popup_at(x, y)`。父窗口尺寸变化时调用方要重新算 ——
+    浮窗自己不知道"我该贴在哪个按钮下面"。
+    """
+
+    view_requested = pyqtSignal()
+    dismissed = pyqtSignal()
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("notifyToast")
+        self.setFixedWidth(TOAST_WIDTH)
+        # ★ 不抢焦点：它只是提示，不该打断打字
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(12, 10, 12, 10)
+        lay.setSpacing(6)
+
+        head = QHBoxLayout()
+        head.setSpacing(6)
+        icon = QLabel()
+        icon.setPixmap(_make_bubble_icon(15).pixmap(QSize(15, 15)))
+        head.addWidget(icon, 0)
+        self._title = QLabel("有新的推送")
+        self._title.setObjectName("toastTitle")
+        head.addWidget(self._title, 1)
+        lay.addLayout(head)
+
+        self._sub = QLabel("")
+        self._sub.setObjectName("toastSub")
+        lay.addWidget(self._sub)
+
+        row = QHBoxLayout()
+        row.setSpacing(12)
+        row.addStretch(1)
+        self._view = QPushButton("查看")
+        self._view.setObjectName("toastView")
+        self._view.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._view.clicked.connect(self._on_view)
+        row.addWidget(self._view, 0)
+        self._dismiss = QPushButton("忽略")
+        self._dismiss.setObjectName("toastDismiss")
+        self._dismiss.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._dismiss.clicked.connect(self.dismiss)
+        row.addWidget(self._dismiss, 0)
+        lay.addLayout(row)
+
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.timeout.connect(self.dismiss)
+
+        try:                                    # 阴影不是必需的，失败就算了
+            from PyQt6.QtGui import QColor as _QColor
+            from PyQt6.QtWidgets import QGraphicsDropShadowEffect
+            shadow = QGraphicsDropShadowEffect(self)
+            shadow.setBlurRadius(18)
+            shadow.setOffset(0, 4)
+            shadow.setColor(_QColor(0, 0, 0, 46))
+            self.setGraphicsEffect(shadow)
+        except Exception:                                       # noqa: BLE001
+            pass
+
+        self.hide()
+
+    # ---- 内容与显示 ----
+
+    def set_content(self, count: int, latest_title: str) -> None:
+        n = max(1, int(count))
+        self._title.setText(f"有 {n} 条未读推送")
+        fm = self._sub.fontMetrics()
+        text = str(latest_title or "").strip() or "（无标题）"
+        self._sub.setText(fm.elidedText(text, Qt.TextElideMode.ElideRight,
+                                        TOAST_WIDTH - 34))
+
+    def popup_at(self, x: int, y: int, *, ms: int = TOAST_MS) -> None:
+        """显示在指定位置，`ms` 后自动收起（0 表示不自动收）。"""
+        self.adjustSize()
+        self.move(max(0, int(x)), max(0, int(y)))
+        self.show()
+        self.raise_()
+        if ms > 0:
+            self._timer.start(int(ms))
+        else:
+            self._timer.stop()
+
+    def dismiss(self) -> None:
+        self._timer.stop()
+        if self.isVisible():
+            self.hide()
+            self.dismissed.emit()
+
+    def _on_view(self) -> None:
+        self.dismiss()
+        self.view_requested.emit()

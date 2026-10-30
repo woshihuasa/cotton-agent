@@ -65,6 +65,7 @@ class Checker:
 #:   届时把它加到这里即可（比漏掉真 bug 划算）。
 QT_NAMES: frozenset[str] = frozenset("""
 accept reject close show hide resize move setFixedSize setMinimumSize
+setFixedWidth setFixedHeight setGraphicsEffect
 setMaximumWidth setMinimumWidth setStyleSheet setObjectName setWindowTitle
 setCursor setToolTip setAttribute setPixmap setModal setEchoMode echoMode
 setCentralWidget centralWidget width height rect update updateGeometry

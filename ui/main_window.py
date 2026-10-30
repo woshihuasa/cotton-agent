@@ -63,6 +63,7 @@ from ui.notifications import (
     NOTIFY_STYLE,
     NotificationButton,
     NotificationDrawer,
+    NotificationToast,
     drawer_width_for,
 )
 from ui.settings_dialog import SettingsDialog
@@ -1472,6 +1473,8 @@ class CottonAgentWindow(QMainWindow):
 
         self._refresh_notifications()
         self._set_status("收到一条新推送")
+        # 抽屉没开就弹一下浮条；开着就不用弹，用户已经在看了
+        self._maybe_show_toast()
 
     # ── 通知中心：角标、抽屉、已读 ─────────────────────────
 
@@ -1526,11 +1529,52 @@ class CottonAgentWindow(QMainWindow):
         self._notify_store.mark_all_read()
         self._refresh_notifications()
 
+    # ── 启动浮窗 ────────────────────────────────────────
+
+    def showEvent(self, event) -> None:                       # noqa: N802
+        """第一次显示之后才弹浮窗。
+
+        ★ 必须等窗口真的显示了：`show()` 之前布局还没走到位，
+          `mapTo()` 算出来的坐标是错的（入口按钮会在左上角）。
+          第一次显示之后，最小化再恢复也不再弹，免得反复打扰。
+        """
+        super().showEvent(event)
+        if not getattr(self, "_toast_armed", False):
+            self._toast_armed = True
+            QTimer.singleShot(900, self._maybe_show_toast)
+
+    def _toast_position(self) -> tuple[int, int]:
+        """浮窗锚在入口按钮下方，并夹在窗口内。"""
+        toast = self._notify_toast
+        toast.adjustSize()
+        anchor = self._notify_btn.mapTo(self, QPoint(0, self._notify_btn.height()))
+        x = anchor.x() + self._notify_btn.width() - toast.width()
+        y = anchor.y() + 6
+        x = max(8, min(x, self.width() - toast.width() - 8))
+        y = max(8, min(y, self.height() - toast.height() - 8))
+        return x, y
+
+    def _maybe_show_toast(self) -> None:
+        """有未读就弹一下；抽屉开着的时候不弹（用户已经在看了）。"""
+        if not self.isVisible() or getattr(self, "_notify_open", False):
+            return
+        count = self._notify_store.unread_count()
+        if count <= 0:
+            return
+        items = self._notify_store.items()
+        self._notify_toast.set_content(count, items[0].title if items else "")
+        x, y = self._toast_position()
+        self._notify_toast.popup_at(x, y)
+
     def resizeEvent(self, event) -> None:                     # noqa: N802
-        """窗口尺寸变化时，抽屉宽度按 9:16 重算（只在展开状态下）。"""
+        """窗口尺寸变化时，抽屉宽度按 9:16 重算，浮窗跟着入口按钮走。"""
         super().resizeEvent(event)
         if getattr(self, "_notify_open", False):
             self._notify_drawer.setMaximumWidth(drawer_width_for(self.height()))
+        toast = getattr(self, "_notify_toast", None)
+        if toast is not None and toast.isVisible():
+            x, y = self._toast_position()
+            toast.move(x, y)
 
     # ── 软件更新检查与安装 ──────────────────────────────
 
@@ -1837,6 +1881,12 @@ class CottonAgentWindow(QMainWindow):
         # ★ 存档链接走同一个白名单校验，不另开一条打开文件的路
         self._notify_drawer.archive_requested.connect(self._on_link_clicked)
         root_layout.addWidget(self._notify_drawer)
+
+        # 启动/新消息时的小浮条。★ 是窗口的**子控件**，不是独立窗口 ——
+        # 独立窗口会抢焦点，用户正在打字时突然失焦很烦，且窗口一移动它不跟。
+        self._notify_toast = NotificationToast(self)
+        self._notify_toast.view_requested.connect(self._open_notify_drawer)
+        self._toast_armed = False
 
         self._notify_anim = QParallelAnimationGroup(self)
         self._notify_anim_w = QPropertyAnimation(self._notify_drawer, b"maximumWidth")
