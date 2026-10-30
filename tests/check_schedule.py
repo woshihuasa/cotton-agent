@@ -215,6 +215,19 @@ def section_weather(c: Checker) -> None:
             fc.get("day_temp") == "36°C" and "temperature" not in fc,
             str(sorted(fc)))
 
+    # ★ 下面这条是**接口真实返回的逐字形状**（2026-10-30 实测，阿克苏）。
+    #   它同时踩了两个坑：`风向` 与 `风力` 挤在同一行、风力带 `≤` 前缀。
+    REAL = ("城市: 阿克苏地区\n天气: 霾\n温度: 3°C\n"
+            "风向: 东北 风力: ≤3级\n湿度: 73%\n发布时间: 2026-10-30 11:01:54")
+    real = S.parse_weather(REAL)
+    c.check("★ 真实接口格式：同一行的 `风向` 与 `风力` 都能取到",
+            real.get("wind_direction") == "东北" and real.get("wind_power") == "≤3级",
+            str(real))
+    c.check("带 `≤` / `-` 前缀的风力能取到数字（3、1、7）",
+            (S.as_number("≤3级"), S.as_number("1-3级"), S.as_number("≥7级"))
+            == (3.0, 1.0, 7.0),
+            str((S.as_number("≤3级"), S.as_number("1-3级"), S.as_number("≥7级"))))
+
     rules = [
         S.Rule(id="高温", field="day_temp", op=">=", value=35),
         S.Rule(id="低温", field="night_temp", op="<=", value=5),
