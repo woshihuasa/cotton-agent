@@ -78,6 +78,8 @@ workflows/runs/
 # `schedule.default_jobs()` 给出，首次运行自动落盘），不进版本控制。
 # ★ 放在根目录而不是 workflows/ 下 —— 打包脚本会把整个 workflows/ 收进安装包。
 /schedule/
+# 通知中心收件箱（推送的本机存档，同样属于运行态）
+/notifications/
 
 # ── 测试临时数据目录（COTTON_AGENT_DATA_DIR 隔离用）──
 cotton_test_*/
