@@ -124,6 +124,34 @@ class _Runner:
         return None if self._outputs is None else _Run(self._outputs)
 
 
+class _FlakyRunner(_Runner):
+    """前 N 次提交抛异常，之后恢复正常。用来验证「失败不消费计划时刻」。"""
+
+    def __init__(self, outputs: dict | None = None, *, fail_times: int = 1) -> None:
+        super().__init__(outputs)
+        self.fail_left = fail_times
+
+    def submit_workflow(self, wf, inputs=None):
+        if self.fail_left > 0:
+            self.fail_left -= 1
+            raise RuntimeError("执行器炸了")
+        return super().submit_workflow(wf, inputs)
+
+
+def _isolate() -> None:
+    """换一个新的数据目录，避免上一组的 `state.json` 影响下一组判定。"""
+    os.environ["COTTON_AGENT_DATA_DIR"] = str(SANDBOX / f"{time.time_ns()}")
+
+
+def _drain(sched: S.Scheduler, timeout: float = 3.0) -> None:
+    """等后台的 `_watch` 线程收工。
+
+    ★ 必须等：`schedule_dir()` 是在调用时读环境变量的，下一组 `_isolate()`
+      之后，上一组还没写完的状态会落到**新目录**里，把新用例的状态污染掉。
+    """
+    _wait_for(lambda: not sched._inflight, timeout)
+
+
 def _wait_for(pred, timeout: float = 3.0) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -137,8 +165,7 @@ def _fresh(job: S.Job | None = None, *, outputs=None, fetcher=None,
            launched: bool = True) -> tuple[S.Scheduler, _Runner, list]:
     """造一个隔离的调度器：状态目录在沙箱里，天气用假实现。"""
     # 每轮换一个状态文件，避免前面的用例影响后面的判定
-    stamp = f"{time.time_ns()}"
-    os.environ["COTTON_AGENT_DATA_DIR"] = str(SANDBOX / stamp)
+    _isolate()
     events: list[dict] = []
     runner = _Runner(outputs, launched=launched)
     sched = S.Scheduler(
@@ -363,8 +390,95 @@ def section_fire_once(c: Checker) -> None:
             sched4.state_of("daily_brief").last_note)
 
 
+def section_consume(c: Checker) -> None:
+    c.section("第 5 节：★ 没做成 ≠ 处理过（补发窗口必须真的能用）")
+
+    job = S.default_jobs()[0]
+    t = datetime(2026, 10, 30, 8, 30)
+
+    # ── 知识库晚到一分钟 ──
+    _isolate()
+    holder = {"kb": None}
+    events: list = []
+    runner = _Runner({"brief": {"title": "T", "body": "晴，正常田管。"}})
+    sched = S.Scheduler(runner=runner, kb_provider=lambda: holder["kb"],
+                        fetcher=lambda city, when: WEATHER_TOMORROW,
+                        on_event=events.append)
+    sched.load()
+    sched.jobs = [job]
+
+    c.check("知识库没好 → 不提交", sched.tick(t) == [] and runner.submitted == [])
+    c.check("★ 知识库没好**不消费计划时刻**",
+            sched.state_of(job.id).last_fired == "",
+            repr(sched.state_of(job.id).last_fired))
+    c.check("状态记成 skipped，能看出卡在哪",
+            sched.state_of(job.id).last_status == "skipped",
+            sched.state_of(job.id).last_status)
+
+    sched.tick(t + timedelta(seconds=30))
+    skipped = [e for e in events if e.get("type") == "skipped"]
+    c.check("★ 同一个原因只提示一次（不消费意味着每 30 秒会重走一遍）",
+            len(skipped) == 1, f"实际 {len(skipped)} 条")
+
+    holder["kb"] = {"name": "stub-kb"}
+    c.check("★ 库好了之后，**同一个计划时刻**仍然会跑（这就是补发窗口的意义）",
+            sched.tick(t + timedelta(minutes=1)) == [job.id], str(runner.submitted))
+    c.check("直到真的提交了，才写 last_fired",
+            sched.state_of(job.id).last_fired == "2026-10-30T08:00:00",
+            repr(sched.state_of(job.id).last_fired))
+    _drain(sched)
+
+    # ── 缺必需输入 ──
+    _isolate()
+    bad_inputs = S.Job(**{**job.__dict__, "inputs": {"region": "阿克苏地区"}})
+    runner2 = _Runner({"brief": {"body": "x"}})
+    sched2 = S.Scheduler(runner=runner2, kb_provider=lambda: {},
+                         fetcher=lambda city, when: WEATHER_TOMORROW)
+    sched2.load()
+    sched2.jobs = [bad_inputs]
+    c.check("缺 city → 不提交", sched2.tick(t) == [] and runner2.submitted == [])
+    c.check("★ 缺输入也不消费计划时刻",
+            sched2.state_of(job.id).last_fired == "",
+            repr(sched2.state_of(job.id).last_fired))
+
+    sched2.jobs = [job]
+    c.check("★ 补上输入后，同一个时刻还能跑",
+            sched2.tick(t + timedelta(minutes=2)) == [job.id])
+    _drain(sched2)
+
+    # ── 执行器抛异常 ──
+    _isolate()
+    flaky = _FlakyRunner({"brief": {"body": "x"}})
+    sched3 = S.Scheduler(runner=flaky, kb_provider=lambda: {},
+                         fetcher=lambda city, when: WEATHER_TOMORROW)
+    sched3.load()
+    sched3.jobs = [job]
+    c.check("执行器抛异常 → 本轮没有提交", sched3.tick(t) == [] and flaky.submitted == [])
+    c.check("★ 提交异常也不消费计划时刻",
+            sched3.state_of(job.id).last_fired == "",
+            repr(sched3.state_of(job.id).last_fired))
+    c.check("★ 下一个 tick 会重试提交（不需要等到明天）",
+            sched3.tick(t + timedelta(seconds=30)) == [job.id],
+            str(flaky.submitted))
+    _drain(sched3)
+
+    # ── 反向：错过窗口仍然消费，不能矫枉过正 ──
+    _isolate()
+    runner4 = _Runner({"brief": {"body": "x"}})
+    sched4 = S.Scheduler(runner=runner4, kb_provider=lambda: {},
+                         fetcher=lambda city, when: WEATHER_TOMORROW)
+    sched4.load()
+    sched4.jobs = [job]
+    c.check("★ 错过补发窗口**仍然消费**计划时刻（不是所有失败都重试）",
+            sched4.tick(datetime(2026, 10, 30, 20, 0)) == []
+            and sched4.state_of(job.id).last_fired == "2026-10-30T08:00:00",
+            repr(sched4.state_of(job.id).last_fired))
+    c.check("消费之后再 tick 不会复活",
+            sched4.tick(datetime(2026, 10, 30, 20, 30)) == [])
+
+
 def section_deliver(c: Checker) -> None:
-    c.section("第 5 节：取文字与推送（取不到就说取不到）")
+    c.section("第 6 节：取文字与推送（取不到就说取不到）")
 
     job = S.default_jobs()[0]
     sched, _runner, events = _fresh(
@@ -408,7 +522,7 @@ def section_deliver(c: Checker) -> None:
 
 
 def section_alarm(c: Checker) -> None:
-    c.section("第 6 节：预警的静默期（同一条不会一天内反复推）")
+    c.section("第 7 节：预警的静默期（同一条不会一天内反复推）")
 
     watch = S.default_jobs()[1]
     sched, runner, events = _fresh(
@@ -446,7 +560,7 @@ def section_alarm(c: Checker) -> None:
 
 
 def section_contracts(c: Checker) -> None:
-    c.section("第 7 节：工作流与节点契约（两处登记必须一致）")
+    c.section("第 8 节：工作流与节点契约（两处登记必须一致）")
 
     for name in ("daily_brief.yaml", "weather_alert.yaml"):
         path = ROOT / "workflows" / name
@@ -507,7 +621,7 @@ def section_contracts(c: Checker) -> None:
 
 
 def section_pure(c: Checker) -> None:
-    c.section("第 8 节：★ 触发层不依赖界面（否则测试与命令行都用不了）")
+    c.section("第 9 节：★ 触发层不依赖界面（否则测试与命令行都用不了）")
 
     src = (ROOT / "core" / "schedule.py").read_text(encoding="utf-8")
     tree = ast.parse(src)
@@ -530,7 +644,7 @@ def section_pure(c: Checker) -> None:
     for node in ast.walk(ast.parse(fake)):
         if isinstance(node, ast.Import):
             mods2 |= {a.name.split(".")[0] for a in node.names}
-    c.check("★ 反向验证：塞入 PyQt 导入 → 第 8 节必须报警", "PyQt6" in mods2)
+    c.check("★ 反向验证：塞入 PyQt 导入 → 第 9 节必须报警", "PyQt6" in mods2)
 
     # 对外接口：状态摘要与手动运行
     sched_b, runner_b, _ = _fresh(None, outputs={"brief": {"body": "x"}})
@@ -569,6 +683,7 @@ def main() -> int:
         section_weather(c)
         section_config(c)
         section_fire_once(c)
+        section_consume(c)
         section_deliver(c)
         section_alarm(c)
         section_contracts(c)

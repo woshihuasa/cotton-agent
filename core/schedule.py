@@ -813,11 +813,15 @@ class Scheduler:
         """校验 → 注入运行时对象 → 交执行器。成功返回 run_id，失败返回空串。"""
         wf, issues = self._load_workflow(job.workflow)
         if wf is None:
-            self._record(job, self.state_of(job.id), "failed", scheduled,
-                         note="工作流不可用：" + "；".join(issues[:3]))
-            self._emit({"type": "invalid", "job": job.id, "text":
-                        f"「{job.title or job.id}」的工作流没跑起来："
-                        + "；".join(issues[:3])})
+            # ★ 不消费：YAML 是随包发的，读不出来多半是构建问题或临时读盘失败，
+            #   当天还有六小时可以重试，没理由第一次就放弃。
+            changed = self._record(
+                job, self.state_of(job.id), "failed", scheduled,
+                note="工作流不可用：" + "；".join(issues[:3]), consume=False)
+            if changed:
+                self._emit({"type": "invalid", "job": job.id, "text":
+                            f"「{job.title or job.id}」的工作流没跑起来："
+                            + "；".join(issues[:3])})
             return ""
 
         inputs: dict[str, Any] = dict(job.inputs)
@@ -831,36 +835,55 @@ class Scheduler:
         missing = [name for name, spec in (getattr(wf, "inputs", {}) or {}).items()
                    if getattr(spec, "required", False) and name not in inputs]
         if missing:
-            self._record(job, self.state_of(job.id), "skipped", scheduled,
-                         note="缺少必需输入：" + "、".join(missing))
-            self._emit({"type": "invalid", "job": job.id, "text":
-                        f"「{job.title or job.id}」缺少必需输入：{'、'.join(missing)}"})
+            # ★ 不消费：缺输入多半是配置写漏了，用户当天改好重启就该补上，
+            #   而不是「今天的名额已经用掉了」。
+            changed = self._record(
+                job, self.state_of(job.id), "skipped", scheduled,
+                note="缺少必需输入：" + "、".join(missing), consume=False)
+            if changed:
+                self._emit({"type": "invalid", "job": job.id, "text":
+                            f"「{job.title or job.id}」缺少必需输入：{'、'.join(missing)}"})
             return ""
 
         # ★ 只有真用到 `data.kb_query` 才去要知识库 —— 否则白加载一次向量库。
         if any(n.type == "data.kb_query" for n in wf.nodes):
             kb = self._kb()
             if kb is None:
-                self._record(job, self.state_of(job.id), "skipped", scheduled,
-                             note="知识库未就绪，本次不跑（不拿空检索冒充结果）")
-                self._emit({"type": "skipped", "job": job.id, "text":
-                            f"「{job.title or job.id}」需要知识库，但知识库未就绪，已跳过。"})
+                # ★ 这是本模块最典型的一个「没做成」：知识库在后台同步，
+                #   通常一分钟就好了。不消费计划时刻，下一个 tick 再来一次，
+                #   六小时窗口内几乎必然能补上。
+                changed = self._record(
+                    job, self.state_of(job.id), "skipped", scheduled,
+                    note="知识库未就绪，本次不跑（不拿空检索冒充结果）",
+                    consume=False)
+                if changed:
+                    self._emit({"type": "skipped", "job": job.id, "text":
+                                f"「{job.title or job.id}」需要知识库，但知识库未就绪，"
+                                f"本次不跑（{job.grace_min} 分钟窗口内会重试）。"})
                 return ""
             inputs["__kb__"] = kb
 
         try:
             handle = self._get_runner().submit_workflow(wf, inputs)
         except Exception as e:                                # noqa: BLE001
-            self._record(job, self.state_of(job.id), "failed", scheduled,
-                         note=f"提交失败：{type(e).__name__}: {e}")
-            self._emit({"type": "failed", "job": job.id, "text":
-                        f"「{job.title or job.id}」提交失败：{e}"})
+            # ★ 不消费：抛异常说明执行器本身出了问题，不是「今天不发了」。
+            changed = self._record(
+                job, self.state_of(job.id), "failed", scheduled,
+                note=f"提交失败：{type(e).__name__}: {e}", consume=False)
+            if changed:
+                self._emit({"type": "failed", "job": job.id, "text":
+                            f"「{job.title or job.id}」提交失败：{e}"})
             return ""
 
         if not getattr(handle, "launched", False):
             issues2 = list(getattr(handle, "issues", []) or [])
-            self._record(job, self.state_of(job.id), "failed", scheduled,
-                         note="未启动：" + ("；".join(issues2[:2]) or "未知原因"))
+            changed = self._record(
+                job, self.state_of(job.id), "failed", scheduled,
+                note="未启动：" + ("；".join(issues2[:2]) or "未知原因"), consume=False)
+            if changed:
+                self._emit({"type": "invalid", "job": job.id, "text":
+                            f"「{job.title or job.id}」没有被启动："
+                            + ("；".join(issues2[:2]) or "未知原因")})
             return ""
 
         run_id = str(getattr(handle, "run_id", "") or "")
@@ -1070,13 +1093,33 @@ class Scheduler:
     # ---- 内部 ----
 
     def _record(self, job: Job, st: JobState, status: str, scheduled: datetime,
-                *, note: str = "", run_id: str = "") -> None:
-        st.last_fired = _iso(scheduled)
+                *, note: str = "", run_id: str = "", consume: bool = True) -> bool:
+        """记录一次处理结果。返回「`note` 是否变了」，供调用方决定要不要发事件。
+
+        ★ `consume` 是这个模块最要紧的一个开关，含义只有一个：
+          **这一次算不算把这个计划时刻处理掉了。**
+
+          · `True`  —— 真的处理过了（已提交出去，或者决定放弃这一次）。
+            写 `last_fired`，于是 `due_at()` 不会再为同一时刻返回它。
+          · `False` —— **没做成**（知识库没就绪、提交抛异常、缺输入……）。
+            **不写 `last_fired`**，下一个 tick 会重新判，只要还在补发窗口内就再试。
+
+        为什么必须区分：`last_fired` 同时被读成「这个时刻处理过了」和「该不该再跑」。
+        第一版把「没做成」也写进去，后果是 08:00 那天库晚好一分钟，当天的简报就
+        永久没了 —— 而补发窗口本来给了六个小时。
+
+        代价：不消费就意味着失败分支每 30 秒重走一遍，所以调用方**必须**用返回值
+        去重，只有 `note` 变了才发事件，否则用户会收到一整天每半分钟一条的提示。
+        """
+        changed = (st.last_note != note)
+        if consume:
+            st.last_fired = _iso(scheduled)
         st.last_status = status
         st.last_note = note
         if run_id:
             st.last_run_id = run_id
         self._dirty = True
+        return changed
 
     def _emit(self, payload: dict) -> None:
         cb = self.on_event
