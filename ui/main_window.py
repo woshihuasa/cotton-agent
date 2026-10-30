@@ -118,6 +118,10 @@ QLabel#bubbleLabel {
     font-size: 14px;
     color: #1f1f1f;
 }
+/* ⚠️ 这里原本有一段 `QLabel#bubbleLabel table / th / td / code / pre` 的样式，
+   已经删掉 —— 它们**从来没有生效过**：Qt 的样式表只作用于控件本身，
+   不进入 QLabel 内部那份富文本文档。表格的边框与表头底色改由
+   `MessageBubble._restyle_html()` 用 HTML 属性给出（见那里的注释）。 */
 /* 报告链接按钮：明确的可点目标（不依赖 QLabel 的链接命中区域） */
 QPushButton#reportLinkBtn {
     background-color: #EAF3FF;
@@ -134,26 +138,6 @@ QPushButton#reportLinkBtn:hover {
 }
 QPushButton#reportLinkBtn:pressed {
     background-color: #CFE2FB;
-}
-QLabel#bubbleLabel table {
-    border-collapse: collapse;
-    width: 100%;
-}
-QLabel#bubbleLabel th, QLabel#bubbleLabel td {
-    border: 1px solid #DDDDDD;
-    padding: 6px;
-}
-QLabel#bubbleLabel code {
-    background-color: #F0F0F0;
-    padding: 2px 4px;
-    border-radius: 4px;
-    font-family: Consolas;
-}
-QLabel#bubbleLabel pre {
-    background-color: #F6F8FA;
-    padding: 10px;
-    border-radius: 6px;
-    border: 1px solid #E0E0E0;
 }
 """
 
@@ -950,7 +934,41 @@ class MessageBubble(QWidget):
     @staticmethod
     def _render_markdown(text: str) -> str:
         """将 Markdown 文本转为 HTML。"""
-        return markdown.markdown(text, extensions=['tables', 'fenced_code'])
+        html = markdown.markdown(text, extensions=['tables', 'fenced_code'])
+        return MessageBubble._restyle_html(html)
+
+    @staticmethod
+    def _restyle_html(html: str) -> str:
+        """把 Markdown 转出来的 HTML 调成聊天里能看的样子。
+
+        ★ 这两处都是「**Qt 样式表管不到文档内部**」的直接后果，不是审美问题：
+
+          ① **标题**。Qt 给 `<h1>` 的默认字号约 2em，模型一写 `#`，就是一行
+             30px 的大标题，整段回答立刻从"回答"变成"文档"。而
+             `QLabel#bubbleLabel { font-size: 14px }` 对它无效 —— 那条规则只
+             作用于控件本身。所以只能在这里改成段落 + 内联字号。
+          ② **表格**。`QLabel#bubbleLabel th, td { border: 1px solid #DDD }`
+             这类规则**从来没有生效过**，表格一直显示成一排没有框线的列。
+             边框、内边距、表头底色只能用 HTML 属性给。
+
+        ★ 保留 `<p>`/`<strong>`/`<li>` 等结构，只换标题与表格的呈现方式 ——
+          数据、措辞、层级一个字都不动。
+        """
+        html = re.sub(
+            r"<h1>(.*?)</h1>",
+            r'<p style="font-size: 16px; font-weight: 600; '
+            r'margin: 14px 0 6px 0;">\1</p>',
+            html, flags=re.S)
+        html = re.sub(
+            r"<h([2-6])>(.*?)</h\1>",
+            r'<p style="font-size: 15px; font-weight: 600; '
+            r'margin: 12px 0 6px 0;">\2</p>',
+            html, flags=re.S)
+        html = html.replace(
+            "<table>",
+            '<table border="1" cellspacing="0" cellpadding="6" width="100%">')
+        html = html.replace("<th>", '<th bgcolor="#F2F2F4">')
+        return html
 
     # ── 图片段渲染 ──
 
@@ -1108,6 +1126,10 @@ class MessageBubble(QWidget):
 
         padding = 28 if self._is_user else 20
         max_width = int(parent_width * (0.75 if self._is_user else 0.85))
+        # ★ 中文长文要给行宽设上限：窗口拉宽之后 85% 等于没有上限，
+        #   一行四十多字读起来很累。760 像素大约是一行 35 字。
+        if not self._is_user:
+            max_width = min(max_width, 760)
 
         fm = QFontMetrics(self._label.font())
         inherent = fm.horizontalAdvance(self._label.text())
