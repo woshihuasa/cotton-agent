@@ -29,6 +29,7 @@ import shutil
 import sys
 import tempfile
 import time
+from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -166,6 +167,18 @@ class _FlakyRunner(_Runner):
 def _isolate() -> None:
     """换一个新的数据目录，避免上一组的 `state.json` 影响下一组判定。"""
     os.environ["COTTON_AGENT_DATA_DIR"] = str(SANDBOX / f"{time.time_ns()}")
+
+
+def _daily_job() -> S.Job:
+    """测试用的**每日**任务：08:00 一次。
+
+    ★ 不从 `default_jobs()[0]` 直接拿节奏：出厂配置可能为了验收改成每小时一次
+      （`COTTON_BRIEF_EVERY_MIN` 那类临时口径），而「跨天 / 错过窗口 / 补发」
+      这些语义只有在**每日**节奏下才成立。测试自己钉住节奏，才不会因为产品
+      调了默认值而跟着漂。
+    """
+    return replace(S.default_jobs()[0],
+                   trigger=S.Trigger(kind="daily", at="08:00"))
 
 
 def _drain(sched: S.Scheduler, timeout: float = 3.0) -> None:
@@ -428,7 +441,7 @@ def section_config(c: Checker) -> None:
 def section_fire_once(c: Checker) -> None:
     c.section("第 4 节：★ 一个计划时刻只触发一次（重启也不重复）")
 
-    job = S.default_jobs()[0]
+    job = _daily_job()
     sched, runner, _ = _fresh(job, outputs={"brief": {"title": "T", "body": "晴，正常田管。"}})
 
     fired = sched.tick(datetime(2026, 10, 30, 8, 30))
@@ -458,7 +471,7 @@ def section_fire_once(c: Checker) -> None:
             sched_b.tick(datetime(2026, 10, 31, 8, 5)) == ["daily_brief"])
 
     # 补发窗口
-    job2 = S.default_jobs()[0]
+    job2 = _daily_job()
     sched3, runner3, events3 = _fresh(job2)
     late = sched3.tick(datetime(2026, 10, 30, 20, 0))     # 迟到 12 小时 > 6 小时窗口
     c.check("★ 错过补发窗口 → **不**触发", late == [] and runner3.submitted == [],
@@ -485,7 +498,7 @@ def section_fire_once(c: Checker) -> None:
 def section_consume(c: Checker) -> None:
     c.section("第 5 节：★ 没做成 ≠ 处理过（补发窗口必须真的能用）")
 
-    job = S.default_jobs()[0]
+    job = _daily_job()
     t = datetime(2026, 10, 30, 8, 30)
 
     # ── 知识库晚到一分钟 ──
@@ -574,7 +587,7 @@ def section_failure(c: Checker) -> None:
 
     from core import providers
 
-    job = S.default_jobs()[0]
+    job = _daily_job()
     t = datetime(2026, 10, 30, 8, 30)
     orig = providers.default_client
 
@@ -832,8 +845,11 @@ def section_pure(c: Checker) -> None:
     sched_b, runner_b, _ = _fresh(None, outputs={"brief": {"body": "x"}})
     rows = sched_b.status(datetime(2026, 10, 30, 7, 0))
     by_id = {r["id"]: r for r in rows}
-    c.check("status() 给出每个任务的下次运行时刻",
-            by_id["daily_brief"]["next_run"] == "2026-10-30T08:00:00",
+    c.check("status() 给出每个任务的下次运行时刻（ISO 格式，非空）",
+            bool(by_id["daily_brief"]["next_run"])
+            and by_id["daily_brief"]["next_run"] == S.next_run(
+                sched_b.job("daily_brief").trigger, None,
+                datetime(2026, 10, 30, 7, 0)).isoformat(timespec="seconds"),
             str(by_id.get("daily_brief")))
     c.check("status() 对 interval 任务给的是「上次 + 周期」",
             by_id["weather_watch"]["next_run"] == "2026-10-30T07:00:00",
@@ -849,7 +865,7 @@ def section_pure(c: Checker) -> None:
     c.check("run_now() 对未知任务返回空串", sched_b.run_now("没有这个任务") == "")
 
     # ★ 反向验证：把 last_fired 清空，第 4 节的"不重复"必须失效
-    sched, runner, _ = _fresh(S.default_jobs()[0], outputs={"brief": {"body": "x"}})
+    sched, runner, _ = _fresh(_daily_job(), outputs={"brief": {"body": "x"}})
     sched.tick(datetime(2026, 10, 30, 8, 30))
     sched.state_of("daily_brief").last_fired = ""
     c.check("★ 反向验证：清空 last_fired → 同一时刻会再触发一次"

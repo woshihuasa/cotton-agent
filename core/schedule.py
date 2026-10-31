@@ -485,7 +485,12 @@ def default_jobs() -> list[Job]:
             workflow="daily_brief.yaml",
             kind="workflow",
             enabled=True,
-            trigger=Trigger(kind="daily", at="08:00"),
+            # ★ 验收期节奏：每小时一次。
+            #   正式口径是 `Trigger(kind="daily", at="08:00")` —— 每天清晨一次。
+            #   现在改成间隔是为了**装到机器上能马上看到推送**，不用等到第二天早上。
+            #   恢复出厂：改成 `Trigger(kind="daily", at="08:00")`，或删掉
+            #   `runtime_data/schedule/schedule.json` 让它按默认重建。
+            trigger=Trigger(kind="interval", every_min=60),
             inputs={"city": DEFAULT_CITY, "region": DEFAULT_REGION},
             grace_min=DEFAULT_GRACE_MIN,
             notice_node="brief",
