@@ -90,6 +90,9 @@ cotton_test_*/
 # ── 凭据与服务商配置 ──
 credentials.json
 providers.json
+# 运行时数据：模型清单缓存 / 自定义 Embedding 服务商（开发模式下落在项目根）
+model_cache.json
+embedding_providers.json
 
 # ── 本地诊断脚本 ──
 _*probe*.py
