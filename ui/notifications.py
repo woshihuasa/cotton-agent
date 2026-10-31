@@ -23,6 +23,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Sequence
 
+from core.notifications import DEFAULT_KEEP_DAYS
+
 from PyQt6.QtCore import QRectF, QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap, QTransform
 from PyQt6.QtWidgets import (
@@ -95,13 +97,6 @@ QLabel#notifyHeader {
     font-weight: 600;
     color: #1f1f1f;
 }
-QPushButton#notifyAllRead {
-    background: transparent;
-    border: none;
-    color: #1A73E8;
-    font-size: 11px;
-}
-QPushButton#notifyAllRead:hover { text-decoration: underline; }
 QToolButton#notifyClose {
     background: transparent;
     border: none;
@@ -116,15 +111,8 @@ QLabel#notifyItemTime  { font-size: 11px; color: #9A9A9E; }
 QLabel#notifyItemBody  { font-size: 12px; color: #454549; }
 QFrame#notifySep { background-color: #EFEFF1; border: none; }
 
-QPushButton#notifyLink {
-    background: transparent;
-    border: none;
-    color: #1A73E8;
-    font-size: 11px;
-    padding: 0;
-    text-align: left;
-}
-QPushButton#notifyLink:hover { text-decoration: underline; }
+/* 保留期说明：浅灰、居中，只在有消息时出现 */
+QLabel#notifyFootNote { font-size: 11px; color: #C2C2C7; }
 QLabel#notifyEmpty { font-size: 12px; color: #9A9A9E; }
 
 /* ── 启动浮窗 ──
@@ -286,9 +274,7 @@ class NotificationButton(QWidget):
 
 
 class _NotifyItem(QFrame):
-    """一条推送：标题 + 时间 + 正文 + 存档入口。**平铺，不做卡片。**"""
-
-    archive_requested = pyqtSignal(str)
+    """一条推送：标题 + 时间 + 正文。**平铺，不做卡片，不再提供存档入口。**"""
 
     def __init__(self, item, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -314,12 +300,9 @@ class _NotifyItem(QFrame):
         body.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         lay.addWidget(body)
 
-        if item.path:
-            link = QPushButton("打开存档")
-            link.setObjectName("notifyLink")
-            link.setCursor(Qt.CursorShape.PointingHandCursor)
-            link.clicked.connect(lambda: self.archive_requested.emit(str(item.path)))
-            lay.addWidget(link, 0, Qt.AlignmentFlag.AlignLeft)
+        # ★ 「打开存档」已按用户要求去掉：抽屉里直接读正文就够，
+        #   再给一个跳文件的入口只是多一次点击。存档本身仍然照写
+        #   （`reports/<job_id>-<日期>.md`），只是不再从这里打开。
 
 
 def _separator() -> QFrame:
@@ -343,11 +326,13 @@ def _fmt_time(text: str) -> str:
 
 
 class NotificationDrawer(QFrame):
-    """右侧抽屉。只管渲染与发信号，开关动画由主窗口管。"""
+    """右侧抽屉。只管渲染与「关闭」信号，开关动画由主窗口管。
+
+    ★ 只发 `closed` 一个信号：已读由主窗口在展开时一次性处理（打开即全读），
+      存档入口已按用户要求去掉，所以没有别的回调需要往上传。
+    """
 
     closed = pyqtSignal()
-    all_read_requested = pyqtSignal()
-    archive_requested = pyqtSignal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -364,11 +349,8 @@ class NotificationDrawer(QFrame):
         title.setObjectName("notifyHeader")
         head.addWidget(title, 1)
 
-        self._all_read = QPushButton("全部已读")
-        self._all_read.setObjectName("notifyAllRead")
-        self._all_read.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._all_read.clicked.connect(self.all_read_requested)
-        head.addWidget(self._all_read, 0)
+        # ★ 「全部已读」按钮去掉了：抽屉一打开就全部标为已读，
+        #   这个按钮在同一个界面上永远没有可点的状态（点之前角标已经清零）。
 
         close = QToolButton()
         close.setObjectName("notifyClose")
@@ -377,6 +359,10 @@ class NotificationDrawer(QFrame):
         close.clicked.connect(self.closed)
         head.addWidget(close, 0)
         lay.addLayout(head)
+
+        #: 只保留最近 N 天 —— 数字读的是存储层的常量，不在这里再写一遍，
+        #: 否则改了保留期文案不会跟着变。
+        self._keep_days = int(DEFAULT_KEEP_DAYS)
 
         self._scroll = QScrollArea()
         self._scroll.setObjectName("notifyScroll")
@@ -414,6 +400,14 @@ class NotificationDrawer(QFrame):
         self._stack.addWidget(empty_page)
         lay.addWidget(self._stack, 1)
 
+        # ★ 保留期说明放在抽屉**底部固定位置**，不随列表滚动：
+        #   它的作用是解释"为什么翻不到更早的消息"，滚走了就失去意义。
+        self._foot = QLabel(
+            f"———— 只显示最近{self._keep_days}天的消息 ————")
+        self._foot.setObjectName("notifyFootNote")
+        self._foot.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(self._foot, 0)
+
         self._count = 0
 
     # ---- 渲染 ----
@@ -434,14 +428,13 @@ class NotificationDrawer(QFrame):
         rows = list(items)
         for i, item in enumerate(rows):
             row = _NotifyItem(item, self._container)
-            row.archive_requested.connect(self.archive_requested)
             self._items.insertWidget(self._items.count() - 1, row)
             if i < len(rows) - 1:
                 self._items.insertWidget(self._items.count() - 1, _separator())
 
         self._count = len(rows)
         self._stack.setCurrentIndex(1 if self._count == 0 else 0)
-        self._all_read.setVisible(self._count > 0)
+        self._foot.setVisible(self._count > 0)
         self._scroll.verticalScrollBar().setValue(0)
 
     def item_count(self) -> int:

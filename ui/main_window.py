@@ -1494,6 +1494,9 @@ class CottonAgentWindow(QMainWindow):
         if self._notify_open:
             return
         self._notify_open = True
+        # ★ 抽屉一开，浮条就该收起来：它本来就是"点我去看"的入口，
+        #   用户已经点开了，还压在列表上会挡住内容。
+        self._notify_toast.dismiss()
         self._notify_drawer.setVisible(True)
         self._refresh_notifications()
         if self._notify_store.mark_all_read():
@@ -1523,11 +1526,6 @@ class CottonAgentWindow(QMainWindow):
         """收起动画结束后隐藏抽屉，免得它继续占着布局的焦点与命中区域。"""
         if not self._notify_open and self._notify_drawer.maximumWidth() <= 0:
             self._notify_drawer.setVisible(False)
-
-    def _mark_all_notified(self) -> None:
-        """「全部已读」：清掉未读角标。"""
-        self._notify_store.mark_all_read()
-        self._refresh_notifications()
 
     # ── 启动浮窗 ────────────────────────────────────────
 
@@ -1877,9 +1875,8 @@ class CottonAgentWindow(QMainWindow):
         self._notify_drawer.setMinimumWidth(0)
         self._notify_drawer.setVisible(False)
         self._notify_drawer.closed.connect(self._close_notify_drawer)
-        self._notify_drawer.all_read_requested.connect(self._mark_all_notified)
-        # ★ 存档链接走同一个白名单校验，不另开一条打开文件的路
-        self._notify_drawer.archive_requested.connect(self._on_link_clicked)
+        # ★ 抽屉只发「关闭」一个信号：已读在展开时一次性处理（打开即全读），
+        #   所以既没有「全部已读」按钮要接，也没有存档入口要接。
         root_layout.addWidget(self._notify_drawer)
 
         # 启动/新消息时的小浮条。★ 是窗口的**子控件**，不是独立窗口 ——

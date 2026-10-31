@@ -47,8 +47,8 @@ log = logging.getLogger("Notifications")
 #: 最多保留多少条
 DEFAULT_KEEP = 200
 
-#: 最多保留多少天
-DEFAULT_KEEP_DAYS = 90
+#: 最多保留多少天。★ 界面底部那行字就是读这个值，改这里文案会跟着变。
+DEFAULT_KEEP_DAYS = 15
 
 #: id 只允许这些字符 —— 它会出现在文件名与日志里。
 _ID_RE = re.compile(r"^[A-Za-z0-9_-]+-\d{4}-\d{2}-\d{2}$")
