@@ -573,36 +573,48 @@ def delete_custom(name: str) -> None:
         pass
 
 
-def test_connection(name: str, *, timeout_s: float = 20.0) -> tuple[bool, str]:
-    """测试连接：调 `GET /models`（**不消耗生成 token**）。
+def list_models(name: str, *, timeout_s: float = 20.0
+                ) -> tuple[bool, str, list[str]]:
+    """拉一次 `GET /models`（**不消耗生成 token**），返回 `(ok, 说明, 模型 id 列表)`。
 
-    返回 `(ok, 说明)`。★ 区分四类失败 —— 比"能用/不能用"更有价值：
-    因为"端点/空间不匹配"也报 401，错误信息**看着像"key 失效"**。
+    ★ 区分四类失败 —— 比"能用/不能用"更有价值：因为"端点/空间不匹配"也报 401，
+      错误信息**看着像"key 失效"**。
+
+    ★ 模型列表是给界面做**可选可编辑下拉**用的：各家模型名格式不一样
+      （`qwen3.7-plus` / `deepseek-v4-pro` / `text-embedding-v4`），
+      让用户照着文档手抄最容易抄错一个字符，而错误要到第一次调用才暴露。
     """
     try:
         spec = all_specs().get(name)
         if spec is None:
-            return False, f"未知服务商 {name!r}"
+            return False, f"未知服务商 {name!r}", []
         from core import credentials
         key = credentials.get_key(name) or ""
         if not key:
-            return False, "未配置密钥"
+            return False, "未配置密钥", []
         from openai import OpenAI
         cli = OpenAI(api_key=key, base_url=spec["base_url"], timeout=timeout_s)
         page = cli.models.list()
         ids = [getattr(m, "id", "") for m in getattr(page, "data", [])]
-        return True, f"连接正常，可用模型 {len(ids)} 个"
+        ids = [str(i) for i in ids if i]
+        return True, f"连接正常，可用模型 {len(ids)} 个", ids
     except Exception as e:                                   # noqa: BLE001
         status = getattr(e, "status_code", None)
         if status == 401:
-            return False, "密钥无效，或与端点/空间不匹配（401）"
+            return False, "密钥无效，或与端点/空间不匹配（401）", []
         if status == 404:
-            return False, "端点地址不通（404）"
+            return False, "端点地址不通（404）", []
         if status == 429:
-            return False, "被限流（429），稍后重试"
+            return False, "被限流（429），稍后重试", []
         name_err = type(e).__name__.lower()
         if "timeout" in name_err:
-            return False, f"连接超时（>{timeout_s:.0f}s）"
+            return False, f"连接超时（>{timeout_s:.0f}s）", []
         if "connection" in name_err:
-            return False, "网络不通，或端点地址错误"
-        return False, f"{type(e).__name__}: {str(e)[:120]}"
+            return False, "网络不通，或端点地址错误", []
+        return False, f"{type(e).__name__}: {str(e)[:120]}", []
+
+
+def test_connection(name: str, *, timeout_s: float = 20.0) -> tuple[bool, str]:
+    """测试连接。返回 `(ok, 说明)`；失败分类见 `list_models()`（本函数是它的薄封装）。"""
+    ok, detail, _models = list_models(name, timeout_s=timeout_s)
+    return ok, detail

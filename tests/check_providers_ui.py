@@ -165,10 +165,48 @@ def main() -> int:
     c.check("签名含 timeout 参数（防卡死界面）", "timeout_s" in sig.parameters)
     ok, msg = providers.test_connection("__no_such_provider__")
     c.check("★ 未知提供商 → 返回 (False, 说明)，不抛异常", ok is False and bool(msg), msg)
-    src = inspect.getsource(providers.test_connection)
+    src = inspect.getsource(providers.list_models)
     for token, why in (("401", "鉴权失败"), ("404", "端点不通"),
                        ("429", "限流"), ("timeout", "超时")):
         c.check(f"★ 失败分类里区分了 {token}（{why}）", token in src.lower())
+    c.check("★ 失败分类只在 `list_models` 里写一份（`test_connection` 是薄封装）",
+            "list_models" in inspect.getsource(providers.test_connection))
+
+    # ------------------------------------------------------------------
+    c.section("第 6 节（续）：★ 默认模型是**可选可编辑下拉**")
+    # ------------------------------------------------------------------
+    c.check("★ 模型字段是 QComboBox（下拉），不是纯文本框",
+            type(dlg._model).__name__ == "QComboBox", type(dlg._model).__name__)
+    c.check("★ 下拉**可编辑**（网关的 /models 不全时仍能手输）",
+            dlg._model.isEditable() is True)
+    c.check("构造时不预填候选（打开设置**不联网**）", dlg._model.count() == 0)
+
+    before = dlg._model.currentText()
+    dlg._fill_models(["qwen3.7-plus", "qwen-max", "deepseek-v4-pro"])
+    c.check("填充后三项都在", dlg._model.count() == 3, str(dlg._model.count()))
+    c.check("★ 填充**不覆盖**用户已填的名字",
+            dlg._model.currentText() == before, f"{before} → {dlg._model.currentText()}")
+
+    dlg._model.setCurrentText("qwen-max")
+    c.check("★ 下拉里选一个 → `values()` 跟着变",
+            dlg.values()["default_model"] == "qwen-max", dlg.values()["default_model"])
+
+    dlg._model.setCurrentText("手输的模型名")
+    c.check("手输的名字也能取到（不强制从清单里选）",
+            dlg.values()["default_model"] == "手输的模型名")
+
+    # 构造期间不得联网：把 list_models 换成会炸的桩，构造一个对话框
+    real_list = providers.list_models
+    providers.list_models = lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("构造对话框时不该联网"))
+    try:
+        off = ProviderEditDialog({"name": "x", "label": "x",
+                                  "base_url": "https://a.example/v1",
+                                  "default_model": "m", "builtin": False},
+                                 is_new=True)
+        c.check("★ 构造对话框全程不调用 `list_models`（不联网）", off is not None)
+    finally:
+        providers.list_models = real_list
 
     # ------------------------------------------------------------------
     c.section("第 7 节：★ 设置对话框 —— 旧「DeepSeek API」栏已移除、改名为「模型」")

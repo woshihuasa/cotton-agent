@@ -22,6 +22,7 @@ from __future__ import annotations
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
@@ -118,12 +119,12 @@ class ProviderEditDialog(QDialog):
         self._id.setPlaceholderText("仅小写字母/数字/_/-，例如 my-gateway")
         self._id.setEnabled(is_new)
         if not is_new:
-            self._id.setToolTip("内部 id 创建后不可修改（它是配置与日志的键）")
+            self._id.setToolTip("内部 id 创建后不可修改")
         form.addRow(QLabel("内部 id:"), self._id)
 
         self._label = QLineEdit(spec.get("label", ""))
-        self._label.setPlaceholderText("显示名称，例如 千问 Token Plan")
-        form.addRow(QLabel("显示名称:"), self._label)
+        self._label.setPlaceholderText("例如 Deepseek")
+        form.addRow(QLabel("供应商名称:"), self._label)
 
         self._url = QLineEdit(spec.get("base_url", ""))
         self._url.setPlaceholderText("https://gateway.example/v1")
@@ -144,8 +145,19 @@ class ProviderEditDialog(QDialog):
         url_row.addWidget(self._btn_test)
         form.addRow(QLabel("接口地址:"), url_row)
 
-        self._model = QLineEdit(spec.get("default_model", ""))
-        self._model.setPlaceholderText("qwen3.7-plus")
+        # ★ 默认模型改成**可选可编辑下拉**：点「测试连接」拿到该端点的模型清单后填进来，
+        #   也可以直接手输（有些网关的 /models 不全）。
+        #   ★ 构造时**不发网络请求** —— 只有用户点「测试连接」才去拉，否则打开设置就会卡、
+        #     而且守卫里构造对话框也会变成联网测试。
+        self._model = QComboBox()
+        self._model.setEditable(True)
+        self._model.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self._model.setCurrentText(str(spec.get("default_model", "") or ""))
+        if self._model.lineEdit() is not None:
+            self._model.lineEdit().setPlaceholderText(
+                "点「测试连接」拉取模型清单，或直接输入，例如 qwen3.7-plus")
+        self._model.setToolTip("先点「测试连接」可以下拉选择该端点实际提供的模型；"
+                               "也可以直接输入。")
         form.addRow(QLabel("默认模型:"), self._model)
 
         # API 密钥：只写。留空 = 不修改
@@ -189,13 +201,17 @@ class ProviderEditDialog(QDialog):
             "name": self._id.text().strip(),
             "label": self._label.text().strip(),
             "base_url": self._url.text().strip(),
-            "default_model": self._model.text().strip(),
+            "default_model": self._model.currentText().strip(),
             "api_key": self._key.text(),          # 空串 = 不修改
             "make_default": self._make_default.isChecked(),
         }
 
     def _on_test(self) -> None:
-        """测试连接 —— 调 `GET /models`（**不消耗生成 token**），并区分四类失败。"""
+        """测试连接 —— 调 `GET /models`（**不消耗生成 token**），并区分四类失败。
+
+        ★ 顺便把模型清单填进下拉框，并检查用户填的默认模型**在不在清单里**：
+          名字抄错一个字符时，错误原本要到第一次生成才暴露，而现在当场就能看见。
+        """
         name = self.spec.get("name", "")
         if not name:
             return
@@ -203,12 +219,30 @@ class ProviderEditDialog(QDialog):
         self._test_msg.setText("正在测试连接…")
         self._test_msg.setStyleSheet("font-size:11px; color:#8a919b;")
         try:
-            ok, detail = providers.test_connection(name)
+            ok, detail, ids = providers.list_models(name)
         finally:
             self._btn_test.setEnabled(True)
+
+        if ok and ids:
+            self._fill_models(ids)
+            want = self._model.currentText().strip()
+            if want and want not in ids:
+                detail += f"；⚠️ 但清单里没有「{want}」这个模型，可能拼错了"
+                ok = False
+
         self._test_msg.setText(("✓ " if ok else "✗ ") + detail)
         self._test_msg.setStyleSheet("font-size:11px; color:%s;"
                                      % (COLOR_ON if ok else COLOR_OFF))
+
+    def _fill_models(self, ids: list[str]) -> None:
+        """把模型清单填进下拉框，**保留用户当前填的名字**（不清空、不强制改选）。"""
+        current = self._model.currentText().strip()
+        self._model.blockSignals(True)
+        self._model.clear()
+        self._model.addItems(ids)
+        if current:
+            self._model.setCurrentText(current)
+        self._model.blockSignals(False)
 
     def _on_ok(self) -> None:
         v = self.values()
