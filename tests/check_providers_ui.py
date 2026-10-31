@@ -147,10 +147,18 @@ def main() -> int:
     d0 = ProviderEditDialog(providers.all_specs()["deepseek"], is_new=False)
     c.check("非默认的 deepseek → 勾选框应**未选中**",
             d0._make_default.isChecked() is False)
-    c.check("★ `set_default` 会写 `LLM_PROVIDER`（源码里有该键）",
-            "LLM_PROVIDER" in inspect.getsource(ProviderGroup.set_default))
+    # ★ 2026-11-01：写 `.env` 的逻辑**下沉到 `core.providers.set_default()`** ——
+    #   这样"设为默认"的往返不必为了测一行文件写入去跑 Qt 事件循环
+    #   （新守卫 `check_embedding_providers.py` 直接测核心层的往返）。
+    #   断言对象随之改为**核心层**，并**额外**断言界面确实转调它 ——
+    #   否则这条性质会从"没写"悄悄变成"没调"，而界面看起来一切正常。
+    c.check("★ 核心层 `providers.set_default` 会写 `LLM_PROVIDER`（源码里有该键）",
+            "LLM_PROVIDER" in inspect.getsource(providers.set_default))
     c.check("★ 用的是 `ConfigManager.save`（合并写入，保留注释）",
-            "ConfigManager.save" in inspect.getsource(ProviderGroup.set_default))
+            "ConfigManager.save" in inspect.getsource(providers.set_default))
+    c.check("★★ 界面 `set_default` **转调**核心层（写 .env 的逻辑只有一份）",
+            "set_default" in ProviderGroup.set_default.__code__.co_names,
+            str(ProviderGroup.set_default.__code__.co_names))
 
     # ------------------------------------------------------------------
     c.section("第 6 节：测试连接（区分四类失败，不真调网络）")
@@ -216,8 +224,26 @@ def main() -> int:
     c.check("★ **「DeepSeek API」分组已移除**", "DeepSeek API" not in titles, str(titles))
     c.check("★ **分组名已改为「模型」**", "模型" in titles, str(titles))
     c.check("分组已挂载 ProviderGroup 实例", isinstance(s._providers, ProviderGroup))
+    # ★ 2026-11-01：「Embedding API (硅基流动)」那三个写死输入框已被**移除** ——
+    #   Embedding 页改成与「模型」页**同构**的服务商卡片列表
+    #   （同一个 `ProviderGroup` 类，只是 `kind="embedding"`）。
+    #   旧配置（EMBEDDING_KEY/BASE_URL/MODEL）仍在核心层生效：没有选默认
+    #   Embedding 服务商时**完全沿用**它们，只是界面不再提供编辑入口。
+    c.check("★ **「Embedding API (硅基流动)」写死分组已移除**",
+            "Embedding API (硅基流动)" not in titles, str(titles))
+    c.check("★ **分组名已改为「Embedding」**", "Embedding" in titles, str(titles))
+    c.check("★★ Embedding 页挂载的是**同一个** ProviderGroup（kind=embedding）",
+            isinstance(getattr(s, "_embedding", None), ProviderGroup)
+            and s._embedding.kind == "embedding", repr(getattr(s, "_embedding", None)))
+    c.check("★ 旧的三个写死输入框确实不存在了",
+            not any(hasattr(s, a) for a in ("_emb_key", "_emb_url", "_emb_model")))
+    c.check("★ `_on_save` **不再写 EMBEDDING_\\***（旧键是回退的唯一真相，不许被空值覆盖）",
+            "EMBEDDING_API_KEY" not in inspect.getsource(SettingsDialog._on_save)
+            and "EMBEDDING_MODEL" not in inspect.getsource(SettingsDialog._on_save))
+    c.check("★ `_load_values` **不再读 EMBEDDING_\\***",
+            "EMBEDDING_API_KEY" not in inspect.getsource(SettingsDialog._load_values))
     c.check("Embedding / 其他 API / Web 分组**未被破坏**",
-            all(t in titles for t in ("Embedding API (硅基流动)", "其他 API")), str(titles))
+            "其他 API" in titles, str(titles))
     c.check("★ `_on_save` **不再写 DEEPSEEK_\\***（避免无入口却被覆盖）",
             "DEEPSEEK_API_KEY" not in inspect.getsource(SettingsDialog._on_save))
     c.check("★ `_load_values` **不再读 DEEPSEEK_\\***",

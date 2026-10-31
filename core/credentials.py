@@ -139,12 +139,24 @@ def source(provider: str) -> str:
 # ---------------------------------------------------------------------------
 
 def _env_key(provider: str) -> str:
-    """从环境变量/`AppConfig` 取——**延迟导入 providers 避免循环**。"""
+    """从环境变量/`AppConfig` 取——**延迟导入 providers 避免循环**。
+
+    ★ 2026-11-01：embedding 的密钥键是 `embed:<名称>`（`core.embedding_providers`），
+      不在 LLM 登记表里。若不在这里认一下，老用户 `.env` 里的 `EMBEDDING_API_KEY`
+      就"看不见"——界面上红点（未配置）、实际却能用，那种矛盾最难查。
+      所以先问 embedding 命名空间，再走原来的 LLM 登记表。
+    """
     try:
-        from core.providers import get
-        env_name = get(provider).key_env
+        from core.embedding_providers import env_name_for_key
+        env_name = env_name_for_key(provider)
     except Exception:                                        # noqa: BLE001
         env_name = ""
+    if not env_name:
+        try:
+            from core.providers import get
+            env_name = get(provider).key_env
+        except Exception:                                    # noqa: BLE001
+            env_name = ""
     if not env_name:
         return ""
     return os.getenv(env_name, "") or getattr(AppConfig, env_name, "") or ""

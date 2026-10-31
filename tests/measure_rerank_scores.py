@@ -115,10 +115,14 @@ def score_docs(query: str, texts: list[str]) -> list[float]:
     """调用 Rerank API 逐条打分，返回与 texts 同序的分数列表（失败返回全 0）。"""
     if not texts:
         return []
+    # 端点/密钥走 `core.embedding_providers`（与生产链路**同一处解析**）：
+    # 精排已与 Embedding 解耦，这里再自己拼 `EMBEDDING_BASE_URL + "/rerank"`
+    # 就会与生产行为漂移（本项目反复批评的"两份地图"）。
+    from core.embedding_providers import rerank_api_key, rerank_url
     try:
         resp = requests.post(
-            AppConfig.EMBEDDING_BASE_URL.rstrip("/") + "/rerank",
-            headers={"Authorization": "Bearer " + AppConfig.EMBEDDING_API_KEY},
+            rerank_url(),
+            headers={"Authorization": "Bearer " + rerank_api_key()},
             json={"model": AppConfig.RERANK_MODEL, "query": query,
                   "documents": [t[:2000] for t in texts],
                   "top_n": len(texts), "return_documents": False},

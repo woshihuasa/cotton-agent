@@ -316,6 +316,43 @@ def main() -> int:
             all("builtin" in v for v in providers.all_specs().values()))
 
     # ------------------------------------------------------------------
+    c.section("第 11 节：★ 内置项的**可改字段覆盖**（旧实现里被静默丢弃）")
+    # ------------------------------------------------------------------
+    # 【守的 bug】界面本来就能编辑内置项的显示名与模型，但旧实现只对**自定义项**
+    #   调 `upsert_custom()` —— 内置项的修改被静默丢弃：用户以为换了模型、实际没换，
+    #   要到下一次调用才暴露（而那类错误看起来像"密钥失效"）。
+    import shutil as _shutil
+    import tempfile as _tempfile
+
+    _sb = Path(_tempfile.mkdtemp(prefix="prov_check_", dir=str(ROOT / "tmp")))
+    _real_custom = providers._custom_path
+    providers._custom_path = lambda: _sb / "providers.json"        # type: ignore[assignment]
+    try:
+        c.check("★★ `update_builtin` 的签名里**没有** base_url"
+                "（内置端点改不了 —— 靠签名，而不是靠界面禁用）",
+                "base_url" not in inspect.signature(providers.update_builtin).parameters)
+        providers.update_builtin("qwen", label="千问（自定名）",
+                                 default_model="qwen3.8-max")
+        _spec = providers.all_specs()["qwen"]
+        c.check("★★ 内置项的显示名 / 默认模型可改并生效",
+                _spec["label"] == "千问（自定名）"
+                and _spec["default_model"] == "qwen3.8-max",
+                f"{_spec['label']} / {_spec['default_model']}")
+        c.check("★★★ 端点**没有变**（覆盖字段里根本没有 base_url）",
+                _spec["base_url"] == providers.PROVIDERS["qwen"].base_url,
+                _spec["base_url"])
+        c.check("★ 覆盖后的模型进了候选表（界面不会「默认模型不在清单里」）",
+                "qwen3.8-max" in _spec["models"], str(_spec["models"]))
+        try:
+            providers.update_builtin("随便一个自定义名", default_model="m")
+            c.check("★ 用非内置名调 update_builtin → **必须拒绝**", False)
+        except ValueError:
+            c.check("★ 用非内置名调 update_builtin → **被拒绝**（与 upsert 职责分开）", True)
+    finally:
+        providers._custom_path = _real_custom                       # type: ignore[assignment]
+        _shutil.rmtree(_sb, ignore_errors=True)
+
+    # ------------------------------------------------------------------
     print()
     print("=" * 78)
     print(f"服务商登记表守卫: {c.passed}/{c.total} 通过"

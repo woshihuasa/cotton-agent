@@ -215,6 +215,16 @@ def known_names() -> list[str]:
     return sorted(PROVIDERS)
 
 
+def key_name(provider: str) -> str:
+    """服务商名 → **凭据层里的键**。LLM 侧就是名字本身（恒等函数）。
+
+    ★ 存在的意义是与 `core.embedding_providers.key_name()` **接口对称**：
+      界面（`ui/provider_editor.py`）只调 `key_name()`，于是"密钥存在哪个键下"
+      对两类服务商都只有一处知识，不会有人把 embedding 的 key 写到 LLM 名下。
+    """
+    return provider
+
+
 # ---------------------------------------------------------------------------
 # 熔断器 —— 连续失败后暂时摘除，避免每次都先撞一次墙
 # ---------------------------------------------------------------------------
@@ -470,24 +480,39 @@ def _custom_path() -> Path:
     return Path(app_data_dir()) / "providers.json"
 
 
-def load_custom() -> dict[str, dict]:
-    """读自定义服务商。**任何异常都降级为空**（坏文件不该让应用起不来）。"""
+def _load_all() -> dict:
+    """读整个文件（`providers` + `overrides`）。**任何异常都降级为空**。"""
     try:
         p = _custom_path()
         if not p.is_file():
             return {}
         data = json.loads(p.read_text("utf-8"))
-        provs = data.get("providers") if isinstance(data, dict) else None
-        return provs if isinstance(provs, dict) else {}
+        return data if isinstance(data, dict) else {}
     except Exception:                                        # noqa: BLE001
         return {}
 
 
-def save_custom(provs: dict[str, dict]) -> None:
-    """原子写自定义服务商（临时文件 + `os.replace`）。"""
+def load_custom() -> dict[str, dict]:
+    """读自定义服务商。**任何异常都降级为空**（坏文件不该让应用起不来）。"""
+    provs = _load_all().get("providers")
+    return provs if isinstance(provs, dict) else {}
+
+
+def load_overrides() -> dict[str, dict]:
+    """读**内置项的可改字段覆盖**（见 `EDITABLE_BUILTIN_FIELDS`）。
+
+    端点**不在**覆盖范围内 —— 它没有参数入口（`update_builtin` 的签名里没有
+    `base_url`），所以"改坏内置端点"在调用层面就做不到。
+    """
+    got = _load_all().get("overrides")
+    return got if isinstance(got, dict) else {}
+
+
+def _save_all(provs: dict[str, dict], overrides: dict[str, dict]) -> None:
+    """原子写（临时文件 + `os.replace`）。"""
     p = _custom_path()
     p.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps({"version": 1, "providers": provs},
+    payload = json.dumps({"version": 2, "providers": provs, "overrides": overrides},
                          ensure_ascii=False, indent=2)
     fd, tmp = tempfile.mkstemp(dir=str(p.parent), prefix=".prov_", suffix=".tmp")
     try:
@@ -503,6 +528,36 @@ def save_custom(provs: dict[str, dict]) -> None:
     clear_client_cache()        # 端点/模型变了，旧客户端不能再用
 
 
+def save_custom(provs: dict[str, dict]) -> None:
+    """原子写自定义服务商（**保留已有覆盖**）。"""
+    _save_all(provs, load_overrides())
+
+
+def update_builtin(name: str, *, label: str = "",
+                   default_model: str = "") -> None:
+    """更新内置项的**可改字段**（`EDITABLE_BUILTIN_FIELDS`：显示名 / 默认模型）。
+
+    ★ 为什么需要它：界面本来就能编辑内置项的显示名与模型，但旧实现只对
+      **自定义项**调 `upsert_custom()` —— 内置项的修改被**静默丢弃**。
+      用户以为改了模型，实际没改，直到下一次调用才暴露（且错误像"密钥失效"）。
+    ★ 端点没有参数入口 ⇒ 防改坏端点这件事**不靠界面禁用**，而是靠签名。
+    """
+    if name not in PROVIDERS:
+        raise ValueError(f"{name!r} 不是内置服务商（自定义项请用 upsert_custom）")
+    if not default_model.strip():
+        raise ValueError("默认模型不能为空")
+    overrides = load_overrides()
+    cur = dict(overrides.get(name) or {})
+    for f in EDITABLE_BUILTIN_FIELDS:
+        if f == "label" and label:
+            cur["label"] = label
+        elif f == "default_model":
+            cur["default_model"] = default_model.strip()
+    cur.setdefault("label", PROVIDERS[name].label)
+    overrides[name] = cur
+    _save_all(load_custom(), overrides)
+
+
 def all_specs() -> dict[str, dict]:
     """界面用的**合并视图**：内置 + 自定义。
 
@@ -516,10 +571,19 @@ def all_specs() -> dict[str, dict]:
       **数据一直在，是接口没暴露。**
     """
     out: dict[str, dict] = {}
+    overrides = load_overrides()
     for name, p in PROVIDERS.items():
-        out[name] = {"name": name, "label": p.label, "base_url": p.base_url,
-                     "default_model": p.default_model, "builtin": True,
-                     "models": list(p.models) or [p.default_model],
+        ov = overrides.get(name)
+        ov = ov if isinstance(ov, dict) else {}
+        label = str(ov.get("label") or p.label)
+        model = str(ov.get("default_model") or p.default_model)
+        models = list(p.models) or [p.default_model]
+        # ★ 覆盖的模型必须进候选表 —— 否则界面会"默认模型不在自己的清单里"
+        if model not in models:
+            models.insert(0, model)
+        out[name] = {"name": name, "label": label, "base_url": p.base_url,
+                     "default_model": model, "builtin": True,
+                     "models": models,
                      "key_env": p.key_env, "compat": list(p.compat)}
     for name, d in load_custom().items():
         if name in out or not isinstance(d, dict):
@@ -568,9 +632,26 @@ def delete_custom(name: str) -> None:
         save_custom(provs)
     try:
         from core import credentials
-        credentials.delete_key(name)
+        credentials.delete_key(key_name(name))
     except Exception:                                        # noqa: BLE001
         pass
+
+
+def set_default(name: str) -> None:
+    """把某服务商设为默认 —— 写 `LLM_PROVIDER` 到 `.env` 并热更新。
+
+    ★ 同时把 `LLM_MODEL` 清空：模型是"按服务商"的概念，留着上一家的模型名
+      会在切换后**打到错误端点上**（401 或"模型不存在"，且错误看着像密钥失效）。
+    ★ 写在核心层而不是界面层：这样"设为默认"能被**不依赖 Qt 的守卫**验证往返。
+    """
+    name = (name or "").strip()
+    if name not in all_specs():
+        raise ValueError(f"未登记的服务商 {name!r}")
+    from core.config_manager import ConfigManager
+    from config import reload_config
+
+    ConfigManager.save({"LLM_PROVIDER": name, "LLM_MODEL": ""})
+    reload_config()
 
 
 def list_models(name: str, *, timeout_s: float = 20.0

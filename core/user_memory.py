@@ -34,9 +34,6 @@ from datetime import datetime, timezone
 
 import chromadb
 
-# ── 当前方案：硅基流动 API Embedding ──
-from langchain_openai import OpenAIEmbeddings
-
 from config import AppConfig
 from core.memory_scope import (
     PROFILE_COLLECTION,
@@ -161,12 +158,11 @@ class UserMemoryStore:
         """
         self._db_path = str(db_path or AppConfig.USER_MEMORY_DB_PATH)
 
-        self._embeddings = OpenAIEmbeddings(
-            api_key=AppConfig.EMBEDDING_API_KEY,
-            base_url=AppConfig.EMBEDDING_BASE_URL,
-            model=AppConfig.EMBEDDING_MODEL,
-            check_embedding_ctx_length=False,
-        )
+        # Embedding 与公共知识库**同源**（同一个解析入口），否则两边维度不一致，
+        # 记忆库在换服务商后会检索报错。构造只做配置解析、不发请求。
+        from core.embedding_providers import make_embeddings
+
+        self._embeddings = make_embeddings()
 
         self._chroma_client = chromadb.PersistentClient(path=self._db_path)
 

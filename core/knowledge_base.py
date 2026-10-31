@@ -12,10 +12,12 @@
 本模块只负责**公共知识库**：`data/` 下的公开文档 → `cotton_docs` 集合（只读、可重建、可共享）。
 
 Embedding 方案：
-  - 当前：硅基流动 API (BAAI/bge-large-zh-v1.5)，通过 OpenAI 兼容接口调用
+  - 由 `core/embedding_providers.py` 解析（可选服务商）；旧配置下即
+    硅基流动 API (BAAI/bge-large-zh-v1.5)，通过 OpenAI 兼容接口调用
 """
 
 import hashlib
+import logging
 import os
 import re
 from pathlib import Path
@@ -26,11 +28,10 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_chroma import Chroma
 from langchain_community.document_loaders import PyMuPDFLoader, TextLoader
 
-# ── 当前方案：硅基流动 API Embedding ──
-from langchain_openai import OpenAIEmbeddings
-
 
 from config import AppConfig
+
+log = logging.getLogger(__name__)
 
 def _to_rel(path_or_source: str | Path) -> str:
     """统一为**相对 DATA_DIR 的 posix 相对路径**（如 `新疆_栽培与水肥/x.md`）。
@@ -222,13 +223,11 @@ class KnowledgeBase:
 
     def __init__(self) -> None:
         """初始化 Embedding 模型与 ChromaDB 向量存储。"""
-        # ── 当前方案：硅基流动 API Embedding ──
-        self._embeddings = OpenAIEmbeddings(
-            api_key=AppConfig.EMBEDDING_API_KEY,
-            base_url=AppConfig.EMBEDDING_BASE_URL,
-            model=AppConfig.EMBEDDING_MODEL,
-            check_embedding_ctx_length=False,
-        )
+        # ── Embedding：由 `core/embedding_providers.resolve()` 决定用哪家 ──
+        # ★ 构造只做配置解析、**不发请求**（与改造前一致）。
+        from core.embedding_providers import make_embeddings
+
+        self._embeddings = make_embeddings()
 
         # 初始化 ChromaDB 持久化客户端
         self._vector_store = Chroma(
@@ -547,6 +546,13 @@ class KnowledgeBase:
         向量检索侧重整体语义，对"灌溉 vs 施肥"这类**词面细微差异**不敏感；
         Rerank 让模型逐条比对 (query, 文档) 的相关性，可显著改善排序。
 
+        ★ 2026-11-01 精排与 Embedding **解耦**（`core.embedding_providers`）：
+          端点/密钥默认继承当前 Embedding 服务商，也可用 `RERANK_BASE_URL` /
+          `RERANK_API_KEY` 单独指回原来那家 —— 因为 `POST {base_url}/rerank`
+          是硅基流动**专有**的接口形状，换了 embedding 供应商它未必还在。
+          旧配置下 `rerank_url()` 与改造前的
+          `EMBEDDING_BASE_URL.rstrip("/") + "/rerank"` **逐字相同**。
+
         Args:
             query: 检索查询。
             docs: 候选 Document 列表（向量召回结果，未精排）。
@@ -555,15 +561,22 @@ class KnowledgeBase:
         Returns:
             精排后的 Document 列表；**任何异常都降级为原顺序前 top_n 条**
             ——精排是增益项，不应让主链路失败。
+
+        ⚠️ 降级**不再静默**：原来只 `print` 到控制台（打包版无控制台 = 谁都看不见），
+           现在同时写一条 WARNING 日志 —— 否则"精排悄悄没生效"只能靠答案变差来猜。
         """
         if not docs or top_n <= 0:
             return docs
         if len(docs) == 1:
             return docs[:top_n]
+
+        from core.embedding_providers import rerank_api_key, rerank_url
+
+        url = rerank_url()
         try:
             resp = requests.post(
-                AppConfig.EMBEDDING_BASE_URL.rstrip("/") + "/rerank",
-                headers={"Authorization": "Bearer " + AppConfig.EMBEDDING_API_KEY},
+                url,
+                headers={"Authorization": "Bearer " + rerank_api_key()},
                 json={
                     "model": AppConfig.RERANK_MODEL,
                     "query": query,
@@ -580,8 +593,14 @@ class KnowledgeBase:
                        if isinstance(r.get("index"), int) and 0 <= r["index"] < len(docs)]
             if ordered:
                 return ordered[:top_n]
+            log.warning("[Rerank] %s 返回为空，降级为向量召回顺序（检索质量会下降）",
+                        url)
             print("[Rerank] 返回为空，降级为向量召回顺序。")
-        except Exception as e:
+        except Exception as e:                               # noqa: BLE001
+            log.warning("[Rerank] 精排失败（%s: %s），已降级为向量召回顺序。"
+                        "端点 %s；若换了 Embedding 服务商，请检查 "
+                        "RERANK_BASE_URL / RERANK_API_KEY。",
+                        type(e).__name__, e, url)
             print(f"[Rerank] 精排失败（降级为向量召回顺序）: {e}")
         return docs[:top_n]
 

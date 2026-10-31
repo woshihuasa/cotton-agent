@@ -45,8 +45,15 @@ def _model_signature() -> str:
     """Embedding 模型签名：URL + 模型名。
 
     换模型/换服务商会改变向量维度，必须触发重建（否则检索报维度错误）。
+
+    ★ 2026-11-01：委托给 `core.embedding_providers.model_signature()` ——
+      "现在到底用哪家、哪个模型"的解析只有那一处。**旧配置下返回值与改造前
+      逐字一致**（`EMBEDDING_BASE_URL|EMBEDDING_MODEL` 原样拼接），
+      所以老用户升级后不会因为签名格式变化而被全量重建。
     """
-    return f"{AppConfig.EMBEDDING_BASE_URL}|{AppConfig.EMBEDDING_MODEL}"
+    from core.embedding_providers import model_signature
+
+    return model_signature()
 
 
 def compute_fingerprint(data_dir: Path | None = None) -> str:
@@ -138,7 +145,11 @@ def verify_embedding(force: bool = False) -> tuple[bool, str]:
     Returns:
         (ok, message): ok=False 时 message 说明原因（供 UI 降级提示）。
     """
-    if not AppConfig.EMBEDDING_API_KEY.strip():
+    # ★ 用**解析后**的配置：选了服务商时密钥在凭据层（`embed:<名称>`），
+    #   不再是 AppConfig.EMBEDDING_API_KEY。旧配置下解析结果就是原来那三件套。
+    from core.embedding_providers import make_embeddings, resolve
+
+    if not resolve().api_key.strip():
         return False, "未配置 Embedding API Key，请先在设置中填写"
 
     if not force:
@@ -147,14 +158,7 @@ def verify_embedding(force: bool = False) -> tuple[bool, str]:
             return True, "Embedding API 可用（缓存）"
 
     try:
-        from langchain_openai import OpenAIEmbeddings
-
-        emb = OpenAIEmbeddings(
-            api_key=AppConfig.EMBEDDING_API_KEY,
-            base_url=AppConfig.EMBEDDING_BASE_URL,
-            model=AppConfig.EMBEDDING_MODEL,
-            check_embedding_ctx_length=False,
-        )
+        emb = make_embeddings()
         emb.embed_query("知识库构建验证")
         _check_file().write_text(
             json.dumps({"ok": True, "ts": time.time()}, ensure_ascii=False), "utf-8",

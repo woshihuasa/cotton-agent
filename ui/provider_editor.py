@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
-"""模型提供商管理界面 —— 卡片式列表 + 编辑对话框。
+"""服务商管理界面 —— 卡片式列表 + 编辑对话框。**模型（LLM）与 Embedding 共用同一套**。
 
 【设计参照】DeepSeek Harness（DSH）的 `dsh-client-ui-settings-models`，以及用户提供的界面截图：
-        **圆角卡片行 · 名称 + 状态点 + [编辑]/[删除] · 虚线「＋ 添加模型提供商」**。
+        **圆角卡片行 · 名称 + 状态点 + [编辑]/[删除] · 虚线「＋ 添加xxx」**。
         不用表格、不用表头 —— 表格在这里显得生硬，卡片更像"一列设置项"。
 
         照搬的四条原则：
@@ -12,12 +12,24 @@
           · **测试连接区分四类失败** —— 因为"端点/空间不匹配"也报 401，错误信息会骗人。
 
         另加一条本项目必需的能力（截图里没有、但去掉旧配置栏后必须有）：
-          · **「设为默认」** —— 决定 `LLM_PROVIDER` 指向谁。没有它，用户就只能手工改 `.env`。
+          · **「设为默认」** —— 决定 `LLM_PROVIDER` / `EMBEDDING_PROVIDER` 指向谁。
+            没有它，用户就只能手工改 `.env`。
+
+【`kind` 参数】★ 2026-11-01 把「Embedding 设置」改造成与「模型」同构：
+  本模块的卡片、编辑对话框、状态点、测试连接**只有一份实现**，靠 `kind`
+  切换后端（`core.providers` / `core.embedding_providers`）。两个后端刻意
+  暴露**同名同签名**的 `all_specs / upsert_custom / delete_custom / list_models /
+  key_name / default_provider / set_default`，界面因此不需要任何 `if kind`。
+
+  为什么不去新写一套"长得很像"的控件：两套长得像的界面必然漂移
+  （一边加了"测试连接填下拉"，另一边忘了），而用户看到的是"同一个功能有两种行为"。
 
 【安全红线】本模块**绝不调用**取完整密钥的那个内部函数 ——
         `tests/check_credentials.py` 与 `tests/check_providers_ui.py` 有 AST 级断言盯着。
 """
 from __future__ import annotations
+
+from dataclasses import dataclass
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
@@ -37,7 +49,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from core import credentials, providers
+from core import credentials, embedding_providers, providers
 
 #: 状态点：绿=已配置，红=未配置（与截图一致，只用两个颜色，不引入"不确定"的第三态）
 DOT_ON, DOT_OFF = "●", "●"
@@ -74,40 +86,100 @@ QPushButton#addProvider:hover { background: #f7f8fa; border-color: #b9c0ca; }
 """
 
 
-def _status(name: str) -> tuple[str, str]:
-    """返回 (状态点颜色, 提示文字)。★ 只用 `has_key`/`fingerprint`，**不取完整密钥**。"""
-    if not credentials.has_key(name):
+# ---------------------------------------------------------------------------
+# 两类服务商的**差异表** —— 界面代码里因此不需要任何 `if kind == ...`
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class KindSpec:
+    """一种"服务商列表页"的差异项（其余全部共用）。"""
+
+    backend: object          # core.providers / core.embedding_providers（同名接口）
+    noun: str                # 「模型提供商」/「Embedding 服务商」
+    add_text: str            # 虚线添加按钮文字
+    hint: str                # 卡片列表上方的一句话
+    dialog_new: str          # 新增对话框标题
+    default_text: str        # 编辑页勾选框文字
+    default_done: str        # 设为默认后的提示（`{name}` 占位）
+    footnote: str = ""       # 列表下方的一句灰字（可空）
+
+
+KIND_SPECS: dict[str, KindSpec] = {
+    "llm": KindSpec(
+        backend=providers,
+        noun="模型提供商",
+        add_text="＋  添加模型提供商",
+        hint="填入各提供商的 API 密钥即可使用其模型。密钥只写不读，保存后只显示掩码。",
+        dialog_new="添加模型提供商",
+        default_text="设为默认模型提供商",
+        default_done="已把「{name}」设为默认模型提供商",
+    ),
+    "embedding": KindSpec(
+        backend=embedding_providers,
+        noun="Embedding 服务商",
+        add_text="＋  添加 Embedding 服务商",
+        hint="填入各服务商的 API 密钥即可用它生成向量。密钥只写不读，保存后只显示掩码。"
+             "换服务商或模型会改变向量维度，保存后需要重建知识库。",
+        dialog_new="添加 Embedding 服务商",
+        default_text="设为默认 Embedding 服务商",
+        default_done="已把「{name}」设为默认 Embedding 服务商",
+        footnote="精排（rerank）默认沿用当前 Embedding 服务商的端点与密钥；"
+                 "要单独指回某一家，可在 .env 里设置 RERANK_BASE_URL / RERANK_API_KEY。",
+    ),
+}
+
+
+def kind_spec(kind: str) -> KindSpec:
+    """按 kind 取差异表；未知 kind **明确报错**（不静默退化成 llm 页面）。"""
+    try:
+        return KIND_SPECS[kind]
+    except KeyError:
+        raise ValueError(
+            f"未知的服务商类型 {kind!r}；可用: {sorted(KIND_SPECS)}") from None
+
+
+def _status(name: str, kind: str = "llm") -> tuple[str, str]:
+    """返回 (状态点颜色, 提示文字)。★ 只用 `has_key`/`fingerprint`，**不取完整密钥**。
+
+    密钥键由后端 `key_name()` 决定（embedding 是 `embed:<名称>`），
+    所以"同名 LLM 服务商配了 key、embedding 没配"这种情形不会互相冒充。
+    """
+    key = kind_spec(kind).backend.key_name(name)
+    if not credentials.has_key(key):
         return COLOR_OFF, "未配置密钥"
-    fp = credentials.fingerprint(name)
-    src = credentials.source(name)
+    fp = credentials.fingerprint(key)
+    src = credentials.source(key)
     where = "文件" if src == "file" else ("环境变量" if src == "env" else "")
     return COLOR_ON, f"{fp}" + (f"（{where}）" if where else "")
 
 
-def default_provider_name() -> str:
-    """当前默认服务商名（读 `LLM_PROVIDER`；空串表示尚未指定）。"""
-    try:
-        from config import AppConfig
-        n = (getattr(AppConfig, "LLM_PROVIDER", "") or "").strip()
-    except Exception:                                        # noqa: BLE001
-        n = ""
-    return n if n in providers.all_specs() else ""
+def default_provider_name(kind: str = "llm") -> str:
+    """当前默认服务商名（`LLM_PROVIDER` / `EMBEDDING_PROVIDER`；空串=尚未指定）。
+
+    ★ 空串在两边都意味着"沿用旧配置"：LLM 是 `DEEPSEEK_*`，Embedding 是
+      `EMBEDDING_API_KEY/BASE_URL/MODEL`（见 `core/embedding_providers.resolve()`）。
+    """
+    return kind_spec(kind).backend.default_provider()
 
 
 class ProviderEditDialog(QDialog):
-    """新增/编辑一个模型提供商。
+    """新增/编辑一个服务商（`kind` 决定是模型还是 Embedding）。
 
     · **内置**项：`id` 与 `接口地址` **只读**（端点里编着地域与计费类型，
       改错会返回 401 且错误信息**看着像密钥失效**）；
     · **自定义**项：字段全可编辑，但端点**必须是 https**。
     """
 
-    def __init__(self, spec: dict, *, is_new: bool = False, parent=None) -> None:
+    def __init__(self, spec: dict, *, is_new: bool = False, parent=None,
+                 kind: str = "llm") -> None:
         super().__init__(parent)
+        self.kind = kind
+        self._ks = kind_spec(kind)
         self.spec = dict(spec)
         self.is_new = is_new
         self.builtin = bool(spec.get("builtin"))
-        self.setWindowTitle(("添加模型提供商" if is_new else "编辑") + f" · {spec.get('label', '')}")
+        self.setWindowTitle((self._ks.dialog_new if is_new else "编辑")
+                            + f" · {spec.get('label', '')}")
         self.setMinimumWidth(540)
 
         root = QVBoxLayout(self)
@@ -155,7 +227,8 @@ class ProviderEditDialog(QDialog):
         self._model.setCurrentText(str(spec.get("default_model", "") or ""))
         if self._model.lineEdit() is not None:
             self._model.lineEdit().setPlaceholderText(
-                "点「测试连接」拉取模型清单，或直接输入，例如 qwen3.7-plus")
+                "点「测试连接」拉取模型清单，或直接输入，例如 "
+                + ("BAAI/bge-large-zh-v1.5" if kind == "embedding" else "qwen3.7-plus"))
         self._model.setToolTip("先点「测试连接」可以下拉选择该端点实际提供的模型；"
                                "也可以直接输入。")
         form.addRow(QLabel("默认模型:"), self._model)
@@ -166,15 +239,13 @@ class ProviderEditDialog(QDialog):
         self._key.setPlaceholderText("留空 = 不修改现有密钥")
         form.addRow(QLabel("API 密钥:"), self._key)
 
-        color, text = _status(spec.get("name", ""))
+        color, text = _status(spec.get("name", ""), kind)
         self._status = QLabel(f'<span style="color:{color}">{DOT_OFF}</span> 当前：{text or "未配置"}')
         form.addRow(QLabel(""), self._status)
 
         # ★ 「设为默认」放在编辑页里 —— 卡片上保持截图那种只有 [编辑]/[删除] 的干净样子
-        self._make_default = QCheckBox("设为默认模型提供商")
-        self._make_default.setChecked(default_provider_name() == spec.get("name"))
-        if self.builtin is False and spec.get("name") and not spec.get("name"):
-            self._make_default.setEnabled(False)
+        self._make_default = QCheckBox(self._ks.default_text)
+        self._make_default.setChecked(default_provider_name(kind) == spec.get("name"))
         form.addRow(QLabel(""), self._make_default)
 
         root.addLayout(form)
@@ -219,7 +290,7 @@ class ProviderEditDialog(QDialog):
         self._test_msg.setText("正在测试连接…")
         self._test_msg.setStyleSheet("font-size:11px; color:#8a919b;")
         try:
-            ok, detail, ids = providers.list_models(name)
+            ok, detail, ids = self._ks.backend.list_models(name)
         finally:
             self._btn_test.setEnabled(True)
 
@@ -260,15 +331,18 @@ class ProviderEditDialog(QDialog):
 
 
 class ProviderCard(QFrame):
-    """一行提供商：名称 + 状态点 + [编辑] (+ [删除])。"""
+    """一行服务商：名称 + 状态点 + [编辑] (+ [删除])。"""
 
     def __init__(self, spec: dict, *, is_default: bool, parent_group: "ProviderGroup") -> None:
         super().__init__(parent_group)
         self.spec = spec
         self.name = spec["name"]
         self.group = parent_group
+        self.kind = parent_group.kind
         self.setObjectName("providerCard")
-        self.setStyleSheet(_CARD_QSS)
+        # ★ 样式表由 `ProviderGroup` 统一下发（`_CARD_QSS`），卡片**不再各自带一份**：
+        #   那样写的话「＋ 添加」按钮的 `#addProvider` 规则永远匹配不到，
+        #   因为 `btn_add` 不是卡片的子控件 —— 虚线框因此消失，按钮只剩一行灰字。
 
         row = QHBoxLayout(self)
         row.setContentsMargins(14, 7, 12, 7)
@@ -283,7 +357,7 @@ class ProviderCard(QFrame):
             badge.setObjectName("defaultBadge")
             row.addWidget(badge)
 
-        color, tip = _status(self.name)
+        color, tip = _status(self.name, self.kind)
         dot = QLabel(DOT_OFF)
         dot.setStyleSheet(f"color:{color}; font-size:15px;")
         dot.setToolTip(tip or "未配置密钥")
@@ -306,24 +380,41 @@ class ProviderCard(QFrame):
 
 
 class ProviderGroup(QWidget):
-    """「模型」分组：卡片列表 + 添加按钮 + 状态提示。"""
+    """一组服务商：卡片列表 + 添加按钮 + 状态提示。
 
-    def __init__(self, parent=None) -> None:
+    `kind="llm"` → 「模型」页；`kind="embedding"` → 「Embedding」页。
+    """
+
+    # ★ 三个独立赋值而不是元组解包：`tests/check_ui_attrs.py` 只认**单个 Name 目标**
+    #   的类级赋值，元组目标会被当成"有读无定义"（那守卫会误报）。
+    #: 卡片行高（`refresh()` 量不到真实高度时的兜底估算）
+    ROW_H: int = 44
+    #: 卡片列表下方的余量
+    PAD: int = 6
+    #: 卡片列表滚动区的最大高度（再多就出滚动条）
+    MAX_H: int = 320
+
+    def __init__(self, parent=None, *, kind: str = "llm") -> None:
         super().__init__(parent)
+        self.kind = kind
+        self._ks = kind_spec(kind)
+        # ★ 样式表下发在**分组**这一层：卡片与「＋ 添加」按钮都在它的子树里。
+        #   放在卡片上会让 `QPushButton#addProvider` 规则永远匹配不到。
+        self.setStyleSheet(_CARD_QSS)
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(10)
 
-        hint = QLabel("填入各提供商的 API 密钥即可使用其模型。密钥只写不读，保存后只显示掩码。")
+        hint = QLabel(self._ks.hint)
         hint.setObjectName("formLabel")
         hint.setWordWrap(True)
         root.addWidget(hint)
 
-        # 卡片列表放在滚动区里：提供商多了也不会把对话框撑爆
+        # 卡片列表放在滚动区里：服务商多了也不会把对话框撑爆
         self._scroll = QScrollArea()
         self._scroll.setWidgetResizable(True)
         self._scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self._scroll.setMaximumHeight(320)
+        self._scroll.setMaximumHeight(self.MAX_H)
         # ★ 2026-10-18：QScrollArea 的 viewport 默认用平台调色板（Windows 上是 #efefef），
         #   于是卡片背后会出现**一条灰色横带**（用户反馈的"灰色填充区"之一）。
         #   这里把滚动区与内容页都设为透明，让卡片直接浮在白色对话框上。
@@ -344,7 +435,7 @@ class ProviderGroup(QWidget):
         self._scroll.setWidget(self._body)
         root.addWidget(self._scroll)
 
-        self.btn_add = QPushButton("＋  添加模型提供商")
+        self.btn_add = QPushButton(self._ks.add_text)
         self.btn_add.setObjectName("addProvider")
         self.btn_add.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_add.clicked.connect(self._on_add)
@@ -355,6 +446,13 @@ class ProviderGroup(QWidget):
         self._msg.setStyleSheet("font-size:11px;")
         root.addWidget(self._msg)
 
+        if self._ks.footnote:
+            note = QLabel(self._ks.footnote)
+            note.setObjectName("formLabel")
+            note.setWordWrap(True)
+            note.setStyleSheet("color:#8a919b; font-size:11px;")
+            root.addWidget(note)
+
         self.refresh()
 
     # ---- 列表 ----
@@ -364,17 +462,20 @@ class ProviderGroup(QWidget):
             w = it.widget()
             if w is not None:
                 w.deleteLater()
-        specs = providers.all_specs()
-        cur = default_provider_name()
+        specs = self._ks.backend.all_specs()
+        cur = default_provider_name(self.kind)
         for name, spec in specs.items():
             self._list.addWidget(ProviderCard(spec, is_default=(name == cur),
                                               parent_group=self))
         self._list.addStretch(1)
         # ★ 让滚动区**贴合卡片数量**，而不是固定 320 高 ——
-        # 固定高度会让 2 个提供商时下方留一大片空白（离屏预览时最明显）。
-        row_h, pad = 46, 6
-        h = min(len(specs) * row_h + pad, 320)
-        self._scroll.setFixedHeight(max(h, row_h))
+        # 固定高度会让 2 家服务商时下方留一大片空白（离屏预览时最明显）。
+        # 优先用**真实**内容高度（sizeHint），量不到才退回按行数估算。
+        content = self._body.sizeHint().height()
+        if content <= 0:
+            content = len(specs) * self.ROW_H
+        h = min(content + self.PAD, self.MAX_H)
+        self._scroll.setFixedHeight(max(h, self.ROW_H))
 
     def _say(self, text: str, *, error: bool = False) -> None:
         self._msg.setText(text)
@@ -383,94 +484,82 @@ class ProviderGroup(QWidget):
 
     # ---- 动作（供卡片回调）----
     def edit_provider(self, name: str) -> None:
-        spec = providers.all_specs().get(name)
+        spec = self._ks.backend.all_specs().get(name)
         if spec is None:
             return
-        dlg = ProviderEditDialog(spec, is_new=False, parent=self)
+        dlg = ProviderEditDialog(spec, is_new=False, parent=self, kind=self.kind)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         v = dlg.values()
         if v["api_key"]:
-            credentials.set_key(name, v["api_key"])
-        if not spec.get("builtin"):
-            try:
-                providers.upsert_custom(name, label=v["label"],
-                                        base_url=v["base_url"],
-                                        default_model=v["default_model"])
-            except ValueError as e:
-                QMessageBox.warning(self, "保存失败", str(e))
-                return
-        if v["make_default"] and name != default_provider_name():
+            # ★ 密钥键由后端决定 —— embedding 是 `embed:<名称>`，不与同名 LLM 冲突
+            credentials.set_key(self._ks.backend.key_name(name), v["api_key"])
+        try:
+            if spec.get("builtin"):
+                # ★ 内置项：端点固定不可改，但**显示名 / 默认模型必须能存下来**。
+                #   旧实现只给自定义项调 upsert_custom()，内置项的修改被**静默丢弃**
+                #   （用户以为换了模型，实际没换，直到下次调用才暴露）。
+                self._ks.backend.update_builtin(
+                    name, label=v["label"], default_model=v["default_model"])
+            else:
+                self._ks.backend.upsert_custom(name, label=v["label"],
+                                               base_url=v["base_url"],
+                                               default_model=v["default_model"])
+        except ValueError as e:
+            QMessageBox.warning(self, "保存失败", str(e))
+            return
+        if v["make_default"] and name != default_provider_name(self.kind):
             self.set_default(name)
             return                       # set_default 内部已 refresh 并提示
         self._say(f"已保存 {name}" + ("（密钥未改动）" if not v["api_key"] else ""))
         self.refresh()
 
     def set_default(self, name: str) -> None:
-        """把某个提供商设为默认 —— 写 `LLM_PROVIDER` 到 `.env` 并热更新。
+        """把某个服务商设为默认 —— 写 `<LLM|EMBEDDING>_PROVIDER` 到 `.env` 并热更新。
 
-        ★ **这是去掉旧「DeepSeek API」栏后必须有的入口**：
-        没有它，`LLM_PROVIDER` 就只能手工改 `.env`，而界面上已经改不到那三个键了。
+        ★ 真正落盘的逻辑在核心层（`core.providers.set_default` /
+          `core.embedding_providers.set_default`）：界面只调用与提示。
+          这样"设为默认"的往返**不依赖 Qt** 也能被守卫验证（不必为了测一行
+          `.env` 写入去跑事件循环）。
         """
         try:
-            from core.config_manager import ConfigManager
-            from config import reload_config
-            # 合并写入：保留注释与其它行不变
-            ConfigManager.save({"LLM_PROVIDER": name, "LLM_MODEL": ""})
-            reload_config()
+            self._ks.backend.set_default(name)
         except Exception as e:                               # noqa: BLE001
             self._say(f"设为默认失败：{type(e).__name__}: {e}", error=True)
             self.refresh()
             return
-        self._say(f"已把「{name}」设为默认模型提供商")
+        self._say(self._ks.default_done.format(name=name))
         self.refresh()
 
     def delete_provider(self, name: str) -> None:
         ok = QMessageBox.question(
-            self, "删除模型提供商",
+            self, f"删除{self._ks.noun}",
             f"确定删除「{name}」吗？它的密钥也会一并清除。",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         if ok != QMessageBox.StandardButton.Yes:
             return
         try:
-            providers.delete_custom(name)
+            self._ks.backend.delete_custom(name)
         except ValueError as e:
             QMessageBox.warning(self, "删除失败", str(e))
             return
         self._say(f"已删除 {name}")
         self.refresh()
 
-    def set_default(self, name: str) -> None:
-        """把某个提供商设为默认 —— 写 `LLM_PROVIDER` 到 `.env` 并热更新。"""
-        try:
-            from core.config_manager import ConfigManager
-            from config import reload_config
-        except Exception as e:                               # noqa: BLE001
-            self._say(f"无法写入配置：{type(e).__name__}: {e}", error=True)
-            return
-        try:
-            ConfigManager.save({"LLM_PROVIDER": name, "LLM_MODEL": ""})
-            reload_config()
-        except Exception as e:                               # noqa: BLE001
-            self._say(f"设为默认失败：{type(e).__name__}: {e}", error=True)
-            return
-        self._say(f"已把「{name}」设为默认模型提供商")
-        self.refresh()
-
     def _on_add(self) -> None:
         spec = {"name": "", "label": "", "base_url": "", "default_model": "", "builtin": False}
-        dlg = ProviderEditDialog(spec, is_new=True, parent=self)
+        dlg = ProviderEditDialog(spec, is_new=True, parent=self, kind=self.kind)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         v = dlg.values()
         try:
-            providers.upsert_custom(v["name"], label=v["label"],
-                                    base_url=v["base_url"],
-                                    default_model=v["default_model"])
+            self._ks.backend.upsert_custom(v["name"], label=v["label"],
+                                           base_url=v["base_url"],
+                                           default_model=v["default_model"])
         except ValueError as e:
             QMessageBox.warning(self, "添加失败", str(e))
             return
         if v["api_key"]:
-            credentials.set_key(v["name"], v["api_key"])
+            credentials.set_key(self._ks.backend.key_name(v["name"]), v["api_key"])
         self._say(f"已添加 {v['name']}（建议点开「编辑」里的状态点确认，或直接设为默认）")
         self.refresh()

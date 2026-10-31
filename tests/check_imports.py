@@ -34,6 +34,7 @@ DEFAULT_TARGETS = [
     "core/context_budget.py",             # 上下文双层预算
     "core/query_router.py",               # 分级网关
     "core/providers.py",                  # 模型服务商登记表
+    "core/embedding_providers.py",        # Embedding 服务商登记表（与上面同构）
     "core/credentials.py",                # 只写凭据层
     "core/tools",                         # 工具层（含 capabilities 闸门）
     # 守卫与治理脚本（本轮新建的全部纳入 —— 名单不再"总在追新文件"）
@@ -54,6 +55,7 @@ DEFAULT_TARGETS = [
     "tests/check_providers.py",
     "tests/check_credentials.py",
     "tests/check_providers_ui.py",
+    "tests/check_embedding_providers.py",
     "tests/check_eval_metrics.py",
     # 编排层（P0）
     "core/orchestration",

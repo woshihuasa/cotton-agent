@@ -1,9 +1,15 @@
 """
 设置对话框 — API Key 管理 GUI
 
-包含 DeepSeek、Embedding (硅基流动)、高德地图、Tavily 四组 API 配置表单，
-以及「Web 服务」的启动 / 停止控制。
+包含「模型」（多提供商管理）、「Embedding」（多提供商管理，与模型页同构）、
+「其他 API」（高德地图 / Tavily）三组配置表单，以及「Web 服务」的启动 / 停止控制。
 密码输入框右侧带"小眼睛"图标，可切换明文/密文显示。
+
+★ 2026-11-01：「Embedding API (硅基流动)」那三个写死的输入框已移除 ——
+  改成与「模型」页同构的**可选、可添加**服务商卡片列表（复用 `ui/provider_editor.py`，
+  只是 `kind="embedding"`）。旧配置（`EMBEDDING_API_KEY/BASE_URL/MODEL`）仍然有效：
+  只要没有在界面上选默认 Embedding 服务商，程序就完全沿用它们
+  （见 `core/embedding_providers.resolve()`）。
 
 设置项较多时内容区放进 QScrollArea 滚动，窗口高度固定为屏幕可用高度的 82%
 （上限 680px），避免对话框被内容撑到超出屏幕。
@@ -275,16 +281,16 @@ class PasswordLineEdit(QLineEdit):
 # ── 设置对话框 ─────────────────────────────────────
 
 class SettingsDialog(QDialog):
-    """API Key 配置对话框。
+    """API 配置对话框。
 
-    - DeepSeek: API Key / Base URL / Model
-    - Embedding (硅基流动): API Key / Base URL / Model
-    - 高德地图: API Key
-    - Tavily 搜索: API Key
+    - 模型: 多提供商卡片列表（登记表 + 凭据层 + `LLM_PROVIDER`）
+    - Embedding: 多提供商卡片列表（登记表 + 凭据层 + `EMBEDDING_PROVIDER`）
+    - 其他 API: 高德地图 / Tavily
     - Web 服务: 端口 + 启动 / 停止 + 在浏览器中打开
+    - 推送: 定时任务（`ui/schedule_panel.py`）
 
     密码输入框使用 PasswordLineEdit，带小眼睛切换。
-    点保存后写回 .env 文件。
+    「其他 API」点保存后写回 .env；两页服务商列表是**即时保存**（见 `_build_ui`）。
 
     内容区可滚动，窗口高度不会超出屏幕。
     """
@@ -400,22 +406,26 @@ class SettingsDialog(QDialog):
         self._stack = QStackedWidget()
         self._stack.setObjectName("settingsStack")
 
-        # ── Embedding ──
-        emb_group = QGroupBox("Embedding API (硅基流动)")
-        emb_form = QFormLayout(emb_group)
-        emb_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
-
-        self._emb_key = PasswordLineEdit()
-        self._emb_key.setPlaceholderText("sk-...")
-        emb_form.addRow(self._label("API Key:"), self._emb_key)
-
-        self._emb_url = QLineEdit()
-        self._emb_url.setPlaceholderText("https://api.siliconflow.cn/v1")
-        emb_form.addRow(self._label("Base URL:"), self._emb_url)
-
-        self._emb_model = QLineEdit()
-        self._emb_model.setPlaceholderText("BAAI/bge-large-zh-v1.5")
-        emb_form.addRow(self._label("Model:"), self._emb_model)
+        # ── Embedding（与「模型」页**同构**：同一个 ProviderGroup，kind 不同）──
+        # ⚠️ 与「模型」页一样**即时保存**（增删改立刻落盘），不依赖底部的"保存"按钮 ——
+        #    密钥写入的是独立的凭据层，混进 _on_save 会让"取消"语义变复杂。
+        # ★ 原来的三个写死输入框（硅基流动的 Key / Base URL / Model）已移除：
+        #   它们背后的键仍是**旧路径的配置**，由核心层在"未选默认服务商"时自动沿用，
+        #   界面不再提供编辑入口（否则会出现"改了却不生效"的隐性矛盾）。
+        emb_group = QGroupBox("Embedding")
+        emb_layout = QVBoxLayout(emb_group)
+        emb_layout.setSpacing(8)
+        try:
+            from ui.provider_editor import ProviderGroup
+            self._embedding = ProviderGroup(kind="embedding")
+            emb_layout.addWidget(self._embedding)
+        except Exception as e:                          # noqa: BLE001
+            # 界面降级：Embedding 页初始化失败**不应让整个设置打不开**
+            err_emb = QLabel(f"Embedding 服务商管理暂不可用：{type(e).__name__}: {e}")
+            err_emb.setWordWrap(True)
+            err_emb.setObjectName("formLabel")
+            emb_layout.addWidget(err_emb)
+            self._embedding = None
 
         # ── 模型（多提供商管理，含「测试连接」与「设为默认」）──
         # ⚠️ 该分组**即时保存**（增删改立刻落盘），不依赖底部的"保存"按钮 ——
@@ -567,9 +577,9 @@ class SettingsDialog(QDialog):
         # ⚠️ 这里**不再**加载 DEEPSEEK_* —— 那三个键仍留在 .env 里（作为
         # `LLM_PROVIDER` 为空时的向后兼容回退），但界面上已经不提供编辑入口：
         # 提供商与密钥统一在「模型」分组里管理（登记表 + 凭据层）。
-        self._emb_key.setText(data.get("EMBEDDING_API_KEY", ""))
-        self._emb_url.setText(data.get("EMBEDDING_BASE_URL", ""))
-        self._emb_model.setText(data.get("EMBEDDING_MODEL", ""))
+        # ⚠️ 也**不再**加载 EMBEDDING_\* —— 同理由：那三个键仍是"没选默认
+        # Embedding 服务商"时的向后兼容回退，但编辑入口已移到「Embedding」分组
+        # （服务商 + 凭据层 + 三个键里只剩"选谁"由 `EMBEDDING_PROVIDER` 表达）。
         self._amap_key.setText(data.get("AMAP_API_KEY", ""))
         self._tavily_key.setText(data.get("TAVILY_API_KEY", ""))
 
@@ -654,10 +664,12 @@ class SettingsDialog(QDialog):
         # ⚠️ **不再写入 DEEPSEEK_\*** —— 模型接入已交给「模型」分组
         # （登记表 + 凭据层 + `LLM_PROVIDER`）。这里若继续写那三个键，
         # 会出现"界面上没有入口、却在每次保存时被覆盖"的隐性副作用。
+        #
+        # ★ 2026-11-01：EMBEDDING_\* 同理 —— Embedding 接入已交给「Embedding」分组
+        # （登记表 + 凭据层 + `EMBEDDING_PROVIDER`）。这里绝不能写那三个键：
+        # 旧配置是"未选默认服务商时的唯一真相"，被界面按空值覆盖一次就等于
+        # **把用户的整个知识库判定为模型变更**（指纹变了 → 全量重建 → 花钱）。
         ConfigManager.save({
-            "EMBEDDING_API_KEY": self._emb_key.text().strip(),
-            "EMBEDDING_BASE_URL": self._emb_url.text().strip() or "https://api.siliconflow.cn/v1",
-            "EMBEDDING_MODEL": self._emb_model.text().strip() or "BAAI/bge-large-zh-v1.5",
             "AMAP_API_KEY": self._amap_key.text().strip(),
             "TAVILY_API_KEY": self._tavily_key.text().strip(),
         })

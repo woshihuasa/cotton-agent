@@ -239,16 +239,40 @@ class AppConfig:
     DEEPSEEK_SEARCH_URL: str = os.getenv(
         "DEEPSEEK_SEARCH_URL", "https://api.deepseek.com/v1/tools/search").strip()
 
-    # ── Embedding API 配置 (硅基流动) ──
+    # ── Embedding API 配置（**旧三件套** = 向后兼容路径）──
+    #
+    # ★ 三个键的语义**没有变**：`EMBEDDING_PROVIDER` 留空时，端点/模型/密钥
+    #   完全取自这里，**逐字不变**（连首尾空格都不加工）—— 旧用户的
+    #   知识库指纹因此与改造前一致，不会被无谓重建。
+    #
+    # 一旦 `EMBEDDING_PROVIDER` 选了 `core/embedding_providers.py` 里的服务商：
+    #   · 端点与该服务商的模型取自登记表 + 凭据层（`embed:<名称>`）；
+    #   · `EMBEDDING_BASE_URL` / `EMBEDDING_MODEL` **不再生效**（会记一条 warning），
+    #     但仍然留在 `.env` 里 —— 把 `EMBEDDING_PROVIDER` 清空即可原样切回旧配置。
     EMBEDDING_API_KEY: str = os.getenv("EMBEDDING_API_KEY", "")
     EMBEDDING_BASE_URL: str = os.getenv("EMBEDDING_BASE_URL", "https://api.siliconflow.cn/v1")
     EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "BAAI/bge-large-zh-v1.5")
 
-    # ── Rerank 精排配置（复用硅基流动，同一 API Key）──
+    #: 默认 Embedding 服务商（`core/embedding_providers.py` 的登记名）。
+    #: **留空 = 完全沿用上面的旧三件套**（默认值，行为与改造前逐字一致）。
+    EMBEDDING_PROVIDER: str = os.getenv("EMBEDDING_PROVIDER", "").strip()
+
+    # ── Rerank 精排配置 ──
     # 开启后：向量召回 RERANK_RECALL_K 条 → CrossEncoder 精排 → 取 top-k
+    #
+    # ★ 2026-11-01：精排与 Embedding **解耦**。
+    #   硅基流动的 `POST {base_url}/rerank` 是**它家专有的接口形状**，
+    #   并不是 OpenAI 兼容的一部分。原来直接拼 `EMBEDDING_BASE_URL + "/rerank"`，
+    #   于是"换了 embedding 供应商"就**等于**"精排一定坏"——而且坏得静默。
+    #   现在这两项**默认继承 Embedding 的**（不配就不变，老用户零感知），
+    #   显式配置则覆盖；精排失败时降级为向量顺序**并留日志**。
     RERANK_ENABLED: bool = os.getenv("RERANK_ENABLED", "1").strip().lower() not in ("0", "false", "no", "off")
     RERANK_MODEL: str = os.getenv("RERANK_MODEL", "BAAI/bge-reranker-v2-m3")
     RERANK_RECALL_K: int = int(os.getenv("RERANK_RECALL_K", "20") or "20")
+    #: 精排端点。留空 = 继承当前 Embedding 服务商的 base_url。
+    RERANK_BASE_URL: str = os.getenv("RERANK_BASE_URL", "").strip()
+    #: 精排密钥。留空 = 继承当前 Embedding 服务商的密钥。
+    RERANK_API_KEY: str = os.getenv("RERANK_API_KEY", "").strip()
 
     # ── GitHub 更新检查 ──
     GITHUB_OWNER: str = os.getenv("GITHUB_OWNER", "woshihuasa")
@@ -275,6 +299,10 @@ _RUNTIME_KEYS = (
     "LLM_PROVIDER", "LLM_MODEL",          # 切换默认服务商 / 模型（热更新）
     "AMAP_API_KEY", "TAVILY_API_KEY",
     "EMBEDDING_API_KEY", "EMBEDDING_BASE_URL", "EMBEDDING_MODEL",
+    # ★ 切换默认 Embedding 服务商（热更新）：在「设置 → Embedding」里改完立刻生效
+    "EMBEDDING_PROVIDER",
+    # ★ 精排解耦后的两个覆盖键（留空 = 继承 Embedding，所以默认空串是**正确**的）
+    "RERANK_BASE_URL", "RERANK_API_KEY",
     "GITHUB_OWNER", "GITHUB_REPO",
     "WEB_ACCESS_TOKEN",     # 限流参数改动频率低，重启生效即可，不在此热更新
 )
