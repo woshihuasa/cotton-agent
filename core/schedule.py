@@ -518,6 +518,20 @@ def default_jobs() -> list[Job]:
             notice_node="advice",
             notice_field="body",
         ),
+        Job(
+            id="price_daily",
+            title="每日棉花价格",
+            workflow="price_brief.yaml",
+            kind="workflow",
+            enabled=True,
+            # 收盘后推：郑棉 15:00 收盘，指数页当晚更新当日值。
+            trigger=Trigger(kind="daily", at="17:00"),
+            inputs={},
+            grace_min=DEFAULT_GRACE_MIN,
+            # ★ 这条推送**不经模型**：正文就是工具拼好的三行数字
+            notice_node="index",
+            notice_field="summary",
+        ),
     ]
 
 

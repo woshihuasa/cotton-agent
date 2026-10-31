@@ -67,6 +67,9 @@ CAPABILITIES: dict[str, ToolCapability] = {
     "analyze_yield": ToolCapability(read_only=True, destructive=False, open_world=False),
     # plot_trend 会把图表**写到磁盘**（chart_path），因此不是只读、且可破坏
     "plot_trend": ToolCapability(read_only=False, destructive=True, open_world=False),
+    # 当日价格：只读、联网（抓指数页与期货接口）。不写盘，可重试。
+    "get_cotton_index": ToolCapability(read_only=True, destructive=False,
+                                       open_world=True),
 }
 
 

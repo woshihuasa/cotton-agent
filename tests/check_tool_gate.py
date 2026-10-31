@@ -61,7 +61,8 @@ def main() -> int:
     c.check("注解表键集 == schema 工具名集",
             set(capabilities.CAPABILITIES) == schema_names,
             f"{sorted(capabilities.CAPABILITIES)} vs {sorted(schema_names)}")
-    c.check("工具数确为 6", len(schema_names) == 6, str(len(schema_names)))
+    c.check("工具数确为 7（新增工具必须同时改这一行，防「悄悄多出来一个」）",
+            len(schema_names) == 7, str(len(schema_names)))
     c.check("known_tool_names() 与 schema 一致",
             capabilities.known_tool_names() == schema_names)
 

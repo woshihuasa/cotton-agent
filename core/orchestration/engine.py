@@ -174,6 +174,15 @@ def _exec_tool(node: Node, ctx: NodeContext) -> NodeOutcome:
     elif isinstance(payload, list):
         output.setdefault("items", payload)
 
+    # ★ 工具用 `{"error": ...}` 表达「这次没取到」时，**节点判失败**。
+    #   否则工作流会把一句错误当成正文推出去 —— 用户看到的会是
+    #   「今日价格：指数页解析不到 …」，还以为这就是推送内容。
+    #   口径与 `rag_engine._tool_result_ok()` 一致：工具结果里的 `error` 即失败。
+    if isinstance(payload, dict):
+        err = str(payload.get("error") or "").strip()
+        if err:
+            return NodeOutcome(ok=False, error=err, output=output)
+
     # ② 图片：优先用工具**已经物化**的路径（`chart_path`），不要重复写
     if output.get("chart_path"):
         output["image_path"] = output["chart_path"]

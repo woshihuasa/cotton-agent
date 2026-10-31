@@ -330,7 +330,8 @@ def section_config(c: Checker) -> None:
     c.section("第 3 节：配置（出厂可用、往返不失真、写错就停用）")
 
     jobs = S.default_jobs()
-    c.check("出厂配置有两个触发项（每日农情 + 天气预警）", len(jobs) == 2, str(len(jobs)))
+    c.check("出厂配置有三个触发项（每日农情 + 天气预警 + 每日价格）",
+            len(jobs) == 3, str(len(jobs)))
     c.check("出厂配置**全部合法**",
             all(j.ok for j in jobs), str({j.id: j.validate() for j in jobs}))
     c.check("出厂配置默认地区是阿克苏", jobs[0].inputs.get("city") == "阿克苏")
@@ -757,7 +758,7 @@ def section_alarm(c: Checker) -> None:
 def section_contracts(c: Checker) -> None:
     c.section("第 9 节：工作流与节点契约（两处登记必须一致）")
 
-    for name in ("daily_brief.yaml", "weather_alert.yaml"):
+    for name in ("daily_brief.yaml", "weather_alert.yaml", "price_brief.yaml"):
         path = ROOT / "workflows" / name
         c.check(f"{name} 存在", path.is_file())
         wf = loader.load_file(path)
@@ -782,7 +783,8 @@ def section_contracts(c: Checker) -> None:
 
     # 触发层给的输入必须覆盖工作流声明的必填项
     for job, wf_name in ((S.default_jobs()[0], "daily_brief.yaml"),
-                         (S.default_jobs()[1], "weather_alert.yaml")):
+                         (S.default_jobs()[1], "weather_alert.yaml"),
+                         (S.default_jobs()[2], "price_brief.yaml")):
         wf = loader.load_file(ROOT / "workflows" / wf_name)
         required = {k for k, v in wf.inputs.items() if v.required}
         supplied = set(job.inputs)

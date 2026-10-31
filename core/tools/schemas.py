@@ -206,4 +206,23 @@ TOOL_SCHEMAS: list[dict] = [
                 },
             },
         },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_cotton_index",
+                "description": (
+                    "获取**当日**棉花价格：中国棉花价格指数（CC Index 3128B，全国口径）、"
+                    "新疆棉花棉纱价格指数 3128B（疆内口径）、郑棉期货主力。"
+                    "当用户问今天/最新的棉花价格、行情、涨跌时调用；"
+                    "问历史区间或某个日期之前的价格请用 query_cotton_stats / "
+                    "calc_price_volatility。后者读本地 CSV（到 2026-07-31），"
+                    "本工具取的是当日值，两者口径与时点都不同。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                },
+            },
+        },
     ]

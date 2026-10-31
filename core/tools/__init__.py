@@ -27,6 +27,7 @@ from core.tools.local_data import (
     calc_price_volatility,
     query_cotton_stats,
 )
+from core.tools.market import get_cotton_index
 from core.tools.plot import plot_trend
 from core.tools.result import ToolResult
 from core.tools.schemas import TOOL_SCHEMAS
@@ -56,6 +57,8 @@ TOOL_HANDLERS = {
     "calc_price_volatility": calc_price_volatility,
     "plot_trend": plot_trend,
     "analyze_yield": analyze_yield,
+    # ★ 当日价格（现货指数 + 期货）：知识库那份 CSV 是打包快照，回答不了"今天"
+    "get_cotton_index": get_cotton_index,
 }
 
 
