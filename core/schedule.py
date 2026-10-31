@@ -993,11 +993,49 @@ class Scheduler:
         return run_id
 
     def run_now(self, job_id: str) -> str:
-        """手动跑一次（界面的「立即运行」）。
+        """手动跑一次（**同步**：会真做一次取数与提交，测试与脚本用这个）。
 
         ★ 它**会**更新「上次触发」记录：手动看过一遍之后，同一个计划时刻不再自动
           推一遍（否则用户刚点完，一分钟后还会收到同样的内容）。
+
+        ★ 界面**不要**直接调它：`weather_watch` 要先取一次次日预报才能判规则，
+          那是一个最长 10 秒的 HTTP 请求；在界面线程里做就是窗口假死。
+          界面走 `run_now_async()`。
         """
+        return self._run_now_blocking(job_id)
+
+    def run_now_async(self, job_id: str) -> bool:
+        """手动跑一次（**界面用**）：立刻返回，取数与提交都在后台线程里做。
+
+        ★ 2026-10-31 修：用户点了「立即运行 极端天气预警」之后窗口无响应。
+          根因是 `run_now()` 在界面线程里调 `get_weather`（`requests.get`
+          `timeout=10`），十秒内窗口不重绘，Windows 直接标成"未响应"。
+
+        返回是否真的排进了后台；任务不存在或配置不合法时返回 False（不排队）。
+        结果仍走 `on_event` → 抽屉，和定时触发完全同一条通道。
+        """
+        job = self.job(job_id)
+        if job is None or not job.ok:
+            return False
+        threading.Thread(target=self._run_now_worker, args=(job_id,),
+                         name=f"runnow-{job_id}", daemon=True).start()
+        return True
+
+    def _run_now_worker(self, job_id: str) -> None:
+        """后台线程里跑同步版；失败**如实发一条事件**，不静默。"""
+        try:
+            run_id = self._run_now_blocking(job_id)
+        except Exception as e:                                # noqa: BLE001
+            log.exception("手动运行 %s 失败", job_id)
+            self._emit({"type": "failed", "job": job_id,
+                        "text": f"手动运行失败：{type(e).__name__}: {e}"})
+            return
+        if not run_id:
+            self._emit({"type": "failed", "job": job_id,
+                        "text": "手动运行没能启动 —— 见状态栏或日志"})
+
+    def _run_now_blocking(self, job_id: str) -> str:
+        """真正干活的那半边：取数（可能慢）→ 判规则 → 提交。"""
         job = self.job(job_id)
         if job is None or not job.ok:
             return ""

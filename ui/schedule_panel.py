@@ -207,15 +207,18 @@ class SchedulePanel(QWidget):
     def _on_run(self, job_id: str) -> None:
         if self._sched is None:
             return
+        # ★ 走异步版：取天气是网络请求（最长 10 秒），在界面线程里做会让窗口假死。
+        #   这里立刻返回，结果稍后由调度层通过抽屉推过来。
         try:
-            run_id = self._sched.run_now(str(job_id))
+            started = self._sched.run_now_async(str(job_id))
         except Exception as e:                                # noqa: BLE001
             self._status.setText(f"启动失败：{type(e).__name__}: {e}")
             return
-        if run_id:
-            self._status.setText(f"已提交，run_id = {run_id}（结果稍后推到抽屉里）")
+        if started:
+            self._status.setText("已开始运行，结果稍后推到抽屉里"
+                                 "（取天气与生成都要几秒）。")
         else:
-            self._status.setText("没能启动 —— 看状态栏或日志，那里会写卡在哪一步。")
+            self._status.setText("没能启动 —— 这个任务不存在或配置不合法。")
 
     def _apply_inputs(self) -> None:
         if self._sched is None:
