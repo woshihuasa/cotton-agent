@@ -37,7 +37,7 @@ import os
 import re
 import tempfile
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, time as dtime, timedelta
 from pathlib import Path
 from typing import Any, Callable
@@ -665,7 +665,16 @@ class Scheduler:
         return schedule_dir() / "state.json"
 
     def load(self) -> None:
-        """读配置与状态。**配置文件不存在就写一份出厂配置**，让用户有东西可改。"""
+        """读配置与状态。
+
+        · 文件不存在 → 写一份出厂配置；
+        · 文件**已存在** → 读用户的那份，并把出厂配置里**它还没有的任务补进去**。
+
+        ★ 2026-10-31 补：以前只在"文件不存在"时才写出厂配置，于是**新版本新增的
+          任务永远进不到老用户的配置里** —— 用户装上新版，设置里找不到那个任务，
+          看上去像功能没做。现在改成"已有的以用户为准、缺的按出厂补齐"：
+          用户改过的开关/城市/时刻都不会被覆盖，只是多出新任务那一行。
+        """
         jobs: list[Job] = []
         path = self.config_file
         if path.is_file():
@@ -695,16 +704,45 @@ class Scheduler:
                     continue
                 if job is not None:
                     jobs.append(job)
+
+            added = self._merge_new_defaults(jobs)
+            if added:
+                log.info("出厂任务已补进现有配置：%s", added)
+                self._save_config_list(jobs)
         else:
             jobs = default_jobs()
-            try:
-                _atomic_write_json(path, {"jobs": [j.to_dict() for j in jobs]})
-            except OSError as e:
-                log.warning("出厂调度配置写不出去（%s），仅本次内存生效", e)
+            self._save_config_list(jobs)
 
         self.jobs = jobs
         self._state = self._read_state()
         self._loaded = True
+
+    @staticmethod
+    def _merge_new_defaults(jobs: list[Job]) -> list[str]:
+        """把出厂配置里**用户还没有的**任务补进来，返回补了哪些 id。
+
+        ★ 只补缺的，不动已有的：用户可能停用了某个任务、改了城市或时刻，
+          那些都算他的选择，合并时一律以文件里的为准。
+        ★ 一个任务被用户"删掉"之后还会被补回来 —— 这是有意的：想让某个任务
+          不干活，用它的开关，而不是把它从配置里抹掉（抹掉之后它连设置界面
+          都不出现，下次升级又会"莫名其妙多一条推送"）。
+        """
+        existing = {j.id for j in jobs}
+        added: list[str] = []
+        for default in default_jobs():
+            if default.id in existing:
+                continue
+            jobs.append(replace(default))
+            added.append(default.id)
+        return added
+
+    def _save_config_list(self, jobs: list[Job]) -> None:
+        """把给定任务表写回配置文件（写不出去只记日志）。"""
+        try:
+            _atomic_write_json(self.config_file,
+                               {"jobs": [j.to_dict() for j in jobs]})
+        except OSError as e:
+            log.warning("调度配置写不出去（%s），仅本次内存生效", e)
 
     def _read_state(self) -> dict[str, JobState]:
         path = self.state_file
@@ -774,16 +812,8 @@ class Scheduler:
         return touched
 
     def _save_config(self) -> None:
-        """把当前任务表写回 `schedule.json`。
-
-        ★ 写失败只记日志、不抛：配置写不动不该让正在跑的调度停摆，
-          内存里的改动下一次判定仍然有效（只是重启会丢）。
-        """
-        try:
-            _atomic_write_json(self.config_file,
-                               {"jobs": [j.to_dict() for j in self.jobs]})
-        except OSError as e:
-            log.warning("调度配置写不回去：%s", e)
+        """把当前任务表写回 `schedule.json`（走同一条写入路径）。"""
+        self._save_config_list(self.jobs)
 
     # ---- 判定与触发 ----
 

@@ -424,8 +424,12 @@ def section_config(c: Checker) -> None:
     c.check("inputs 是列表 → 退回空映射，不抛",
             any(j.id == "broken" and j.inputs == {} for j in sched3.jobs),
             str([(j.id, j.inputs) for j in sched3.jobs]))
+    # ★ 用集合比，不数条数：出厂补齐会让"总数"随产品默认值变化，
+#   这条断言只关心"文件里那 3 条该留下谁"。
+    expect_ids = {"daily_brief", "weather_watch", "broken"} | {
+        d.id for d in S.default_jobs()}
     c.check("条目根本不是字典 → 整条丢掉",
-            len(sched3.jobs) == 3, f"实际加载 {len(sched3.jobs)} 条: {ids}")
+            set(ids) == expect_ids, f"实际 {ids}")
 
     # 反向：every_min 是数字时按原值生效（证明上面那条不是「永远退回 60」）
     raw_cfg["jobs"][1]["trigger"]["every_min"] = 45
@@ -437,6 +441,53 @@ def section_config(c: Checker) -> None:
             [j.trigger.every_min for j in sched4.jobs
              if j.id == "weather_watch"] == [45],
             str([(j.id, j.trigger.every_min) for j in sched4.jobs]))
+
+    # ------------------------------------------------------------------
+    # ★ 老配置要能补上**新版本新增的任务**
+    #
+    # 用户装了 v22，设置里找不到「每日棉花价格」——因为出厂配置只在文件不存在时
+    # 才写，老用户的 schedule.json 里没有这一条，它就永远进不来。这不是"没做"，
+    # 是升级路径断了，而且对每一个老用户都会发生。
+    # ------------------------------------------------------------------
+    _isolate()
+    old_cfg = {"jobs": [
+        {"id": "daily_brief", "workflow": "daily_brief.yaml", "kind": "workflow",
+         "enabled": False, "trigger": {"kind": "interval", "every_min": 60},
+         "inputs": {"city": "阿拉尔", "region": "阿拉尔市"},
+         "notice": {"node": "brief", "field": "body"}},
+        {"id": "weather_watch", "workflow": "weather_alert.yaml",
+         "kind": "weather_watch", "enabled": True,
+         "trigger": {"kind": "interval", "every_min": 180},
+         "inputs": {"city": "阿拉尔"},
+         "rules": [{"id": "大风", "field": "day_wind_power", "op": ">=", "value": 6}],
+         "notice": {"node": "advice", "field": "body"}},
+    ]}
+    cfg_path = S.schedule_dir() / "schedule.json"
+    cfg_path.write_text(json.dumps(old_cfg, ensure_ascii=False), encoding="utf-8")
+
+    sched5 = S.Scheduler(fetcher=lambda city, when: "")
+    sched5.load()
+    ids5 = [j.id for j in sched5.jobs]
+    c.check("★ 老配置（只有两条）加载后补上出厂新任务",
+            "price_daily" in ids5, str(ids5))
+    c.check("补进来的任务默认启用",
+            all(j.enabled for j in sched5.jobs if j.id == "price_daily"), "")
+
+    kept = {j.id: j for j in sched5.jobs}
+    c.check("★ 用户自己的改动**没有被覆盖**（daily_brief 仍是停用、城市仍是阿拉尔）",
+            kept["daily_brief"].enabled is False
+            and kept["daily_brief"].inputs.get("city") == "阿拉尔",
+            f"{kept['daily_brief'].enabled} / {kept['daily_brief'].inputs}")
+
+    back = json.loads(cfg_path.read_text(encoding="utf-8"))
+    c.check("★ 补齐之后**写回了文件**（下次启动不用再补）",
+            "price_daily" in [j["id"] for j in back["jobs"]],
+            str([j["id"] for j in back["jobs"]]))
+
+    sched6 = S.Scheduler(fetcher=lambda city, when: "")
+    sched6.load()
+    c.check("★ 反向：再加载一次不会重复追加",
+            len(sched6.jobs) == 3, str([j.id for j in sched6.jobs]))
 
 
 def section_fire_once(c: Checker) -> None:
