@@ -730,16 +730,46 @@ class Scheduler:
         return None
 
     def set_enabled(self, job_id: str, enabled: bool) -> bool:
+        """开关一个任务并写回配置。返回是否找到该任务。"""
         for j in self.jobs:
             if j.id == job_id:
                 j.enabled = bool(enabled)
-                try:
-                    _atomic_write_json(self.config_file,
-                                       {"jobs": [x.to_dict() for x in self.jobs]})
-                except OSError as e:
-                    log.warning("开关写不回去：%s", e)
+                self._save_config()
                 return True
         return False
+
+    def set_inputs(self, **fields: Any) -> int:
+        """给**所有**任务改输入（城市/地区这类全局项）。返回被改动的任务数。
+
+        ★ 空值当作"不改"：把 `city` 改成空串之后，工作流下一次触发会因为
+          缺必需输入而停摆 —— 那不是用户点这个输入框的本意。
+        """
+        touched = 0
+        for j in self.jobs:
+            hit = False
+            for key, value in fields.items():
+                text = str(value or "").strip()
+                if not text or j.inputs.get(key) == text:
+                    continue
+                j.inputs[key] = text
+                hit = True
+            if hit:
+                touched += 1
+        if touched:
+            self._save_config()
+        return touched
+
+    def _save_config(self) -> None:
+        """把当前任务表写回 `schedule.json`。
+
+        ★ 写失败只记日志、不抛：配置写不动不该让正在跑的调度停摆，
+          内存里的改动下一次判定仍然有效（只是重启会丢）。
+        """
+        try:
+            _atomic_write_json(self.config_file,
+                               {"jobs": [j.to_dict() for j in self.jobs]})
+        except OSError as e:
+            log.warning("调度配置写不回去：%s", e)
 
     # ---- 判定与触发 ----
 

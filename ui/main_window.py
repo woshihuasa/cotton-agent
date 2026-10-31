@@ -1527,6 +1527,18 @@ class CottonAgentWindow(QMainWindow):
         if not self._notify_open and self._notify_drawer.maximumWidth() <= 0:
             self._notify_drawer.setVisible(False)
 
+    def _open_schedule_dialog(self) -> None:
+        """打开推送设置（城市 / 开关 / 立即运行）。
+
+        ★ 调度器还没起来也要能打开：窗口里会说明原因，比把按钮禁掉更好，
+          因为用户至少看得到"还没启动"而不是一个点不动的按钮。
+        """
+        from ui.schedule_dialog import ScheduleDialog
+        dlg = ScheduleDialog(getattr(self, "_scheduler", None), parent=self)
+        dlg.exec()
+        # 设置里可能刚手动跑过一次，回来刷新一下角标与列表
+        self._refresh_notifications()
+
     # ── 启动浮窗 ────────────────────────────────────────
 
     def showEvent(self, event) -> None:                       # noqa: N802
@@ -1875,8 +1887,9 @@ class CottonAgentWindow(QMainWindow):
         self._notify_drawer.setMinimumWidth(0)
         self._notify_drawer.setVisible(False)
         self._notify_drawer.closed.connect(self._close_notify_drawer)
-        # ★ 抽屉只发「关闭」一个信号：已读在展开时一次性处理（打开即全读），
-        #   所以既没有「全部已读」按钮要接，也没有存档入口要接。
+        self._notify_drawer.settings_requested.connect(self._open_schedule_dialog)
+        # ★ 抽屉只发「关闭」与「打开设置」两个信号：已读在展开时一次性处理
+        #   （打开即全读），所以没有「全部已读」按钮要接。
         root_layout.addWidget(self._notify_drawer)
 
         # 启动/新消息时的小浮条。★ 是窗口的**子控件**，不是独立窗口 ——

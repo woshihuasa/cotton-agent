@@ -104,6 +104,13 @@ QToolButton#notifyClose {
     font-size: 15px;
 }
 QToolButton#notifyClose:hover { color: #1f1f1f; }
+QToolButton#notifyGear {
+    background: transparent;
+    border: none;
+    color: #8A8A8E;
+    font-size: 14px;
+}
+QToolButton#notifyGear:hover { color: #1f1f1f; }
 
 QFrame#notifyItem { background: transparent; border: none; }
 QLabel#notifyItemTitle { font-size: 12px; font-weight: 600; color: #1f1f1f; }
@@ -333,6 +340,7 @@ class NotificationDrawer(QFrame):
     """
 
     closed = pyqtSignal()
+    settings_requested = pyqtSignal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -351,6 +359,15 @@ class NotificationDrawer(QFrame):
 
         # ★ 「全部已读」按钮去掉了：抽屉一打开就全部标为已读，
         #   这个按钮在同一个界面上永远没有可点的状态（点之前角标已经清零）。
+        #   换成一个齿轮：推送的设置就在这里改（城市、开关、立即运行）。
+
+        gear = QToolButton()
+        gear.setObjectName("notifyGear")
+        gear.setText("⚙")
+        gear.setToolTip("推送设置")
+        gear.setCursor(Qt.CursorShape.PointingHandCursor)
+        gear.clicked.connect(self.settings_requested)
+        head.addWidget(gear, 0)
 
         close = QToolButton()
         close.setObjectName("notifyClose")
