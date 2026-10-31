@@ -176,46 +176,55 @@ def _make_bubble_icon(size: int = 18, color: str = "#3A3A3C") -> QIcon:
 
     ★ 形状取自 Lucide 的 `message-square`（ISC 许可，24×24 描边路径），
       按 24 单位坐标系**重新落成 QPainterPath**，不引入外部 SVG 文件 ——
-      一个图标换一个依赖、一份署名，不值得。这里只近似了它的圆角弧度，
-      18px 下看不出来。
-    ★ 按 `devicePixelRatio` 放大再缩放回去 —— 高 DPI 下画 18×18 会糊。
+      一个图标换一个依赖、一份署名，不值得。原版的尾巴在 18px 下只剩一两个
+      像素，这里把气泡本体压矮一点、把左下角拉出更长的尖角，小尺寸才认得出。
+    ★ 高 DPI：**先按设备像素画，画完再给 QPixmap 打 DPR 标记**。
+      反过来（先 setDevicePixelRatio 再画）QPainter 会自动再乘一次 DPR，
+      路径的右半边和下边跑到画布外 —— 19px 的图标就只剩一个方括号 `⊏`。
+    ★ 一个 QIcon 里放 1.0/1.25/1.5/2.0/3.0（外加当前屏幕 DPR）多份原生像素图：
+      哪种缩放的屏幕来取都有一份清晰的图，由 QIcon 按目标 DPR 自己挑，不靠事后拉伸。
     """
+    size = max(1, int(size))
     app = QApplication.instance()
-    dpr = float(app.devicePixelRatio()) if app is not None else 1.0
-    dpr = max(1.0, min(dpr, 3.0))
-    px = max(1, int(round(size * dpr)))
-    pm = QPixmap(px, px)
-    pm.setDevicePixelRatio(dpr)
-    pm.fill(Qt.GlobalColor.transparent)
+    screen_dpr = float(app.devicePixelRatio()) if app is not None else 1.0
+    screen_dpr = max(1.0, min(screen_dpr, 3.0))
 
-    p = QPainter(pm)
-    p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-    # 24 单位坐标系 → 目标像素
-    scale = (size * dpr) / 24.0
-    p.setTransform(QTransform().scale(scale, scale))
+    icon = QIcon()
+    for dpr in sorted({1.0, 1.25, 1.5, 2.0, 3.0, screen_dpr}):
+        px = max(1, int(round(size * dpr)))
+        pm = QPixmap(px, px)             # 画的时候 DPR 还是 1，避免二次缩放
+        pm.fill(Qt.GlobalColor.transparent)
 
-    path = QPainterPath()
-    path.moveTo(22.0, 17.0)              # 右边，右下圆角之前
-    path.quadTo(22.0, 19.0, 20.0, 19.0)  # 右下角
-    path.lineTo(6.8, 19.0)               # 底边
-    path.quadTo(5.9, 19.0, 5.3, 19.6)    # 底边转角（气泡的小尾巴）
-    path.lineTo(3.2, 21.8)               # 尾巴尖端
-    path.lineTo(2.0, 21.3)
-    path.lineTo(2.0, 5.0)                # 左边
-    path.quadTo(2.0, 3.0, 4.0, 3.0)      # 左上角
-    path.lineTo(20.0, 3.0)               # 顶边
-    path.quadTo(22.0, 3.0, 22.0, 5.0)    # 右上角
-    path.closeSubpath()
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        # 24 单位坐标系 → 实际设备像素
+        p.setTransform(QTransform().scale(px / 24.0, px / 24.0))
 
-    pen = QPen(QColor(color))
-    pen.setWidthF(2.0)                   # 24 单位下的描边宽度
-    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-    p.setPen(pen)
-    p.setBrush(Qt.BrushStyle.NoBrush)
-    p.drawPath(path)
-    p.end()
-    return QIcon(pm)
+        path = QPainterPath()
+        path.moveTo(5.5, 3.0)                 # 左上圆角之后
+        path.lineTo(18.5, 3.0)                # 顶边
+        path.quadTo(21.5, 3.0, 21.5, 6.0)     # 右上圆角
+        path.lineTo(21.5, 13.5)               # 右边
+        path.quadTo(21.5, 16.5, 18.5, 16.5)   # 右下圆角
+        path.lineTo(8.0, 16.5)                # 底边，走到尾巴右根
+        path.lineTo(2.5, 21.5)                # 尾巴：左下角向下的尖
+        path.lineTo(2.5, 6.0)                 # 左边：从尾巴尖直接上去
+        path.quadTo(2.5, 3.0, 5.5, 3.0)       # 左上圆角
+        path.closeSubpath()
+
+        pen = QPen(QColor(color))
+        pen.setWidthF(2.0)                    # 24 单位下的描边宽度
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        p.setPen(pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawPath(path)
+        p.end()
+
+        # 画完再标记：逻辑尺寸仍是 size，设备像素是 px
+        pm.setDevicePixelRatio(px / float(size))
+        icon.addPixmap(pm)
+    return icon
 
 
 class NotificationButton(QWidget):
