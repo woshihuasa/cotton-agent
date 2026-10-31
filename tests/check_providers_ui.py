@@ -183,11 +183,15 @@ def main() -> int:
     # ------------------------------------------------------------------
     c.section("第 6 节（续）：★ 默认模型是**可选可编辑下拉**")
     # ------------------------------------------------------------------
-    c.check("★ 模型字段是 QComboBox（下拉），不是纯文本框",
-            type(dlg._model).__name__ == "QComboBox", type(dlg._model).__name__)
+    c.check("★ 模型字段是下拉（QComboBox 的子类），不是纯文本框",
+            "QComboBox" in [c.__name__ for c in type(dlg._model).__mro__],
+            type(dlg._model).__name__)
+    c.check("★ 下拉用自己的候选浮层（`ModelCombo`，非原生样式）",
+            hasattr(dlg._model, "set_models") and hasattr(dlg._model, "showPopup"))
     c.check("★ 下拉**可编辑**（网关的 /models 不全时仍能手输）",
             dlg._model.isEditable() is True)
-    c.check("构造时不预填候选（打开设置**不联网**）", dlg._model.count() == 0)
+    c.check("构造时候选来自**缓存**（沙箱里没有缓存 → 0 条，且不联网）",
+            dlg._model.count() == 0, str(dlg._model.count()))
 
     before = dlg._model.currentText()
     dlg._fill_models(["qwen3.7-plus", "qwen-max", "deepseek-v4-pro"])

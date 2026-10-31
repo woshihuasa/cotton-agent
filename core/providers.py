@@ -678,6 +678,12 @@ def list_models(name: str, *, timeout_s: float = 20.0
         page = cli.models.list()
         ids = [getattr(m, "id", "") for m in getattr(page, "data", [])]
         ids = [str(i) for i in ids if i]
+        # ★ 顺手存一份缓存：下次打开对话框直接有清单可选，不用再点一次「测试连接」
+        try:
+            from core import model_cache
+            model_cache.put("llm", name, ids)
+        except Exception:                                    # noqa: BLE001
+            pass
         return True, f"连接正常，可用模型 {len(ids)} 个", ids
     except Exception as e:                                   # noqa: BLE001
         status = getattr(e, "status_code", None)

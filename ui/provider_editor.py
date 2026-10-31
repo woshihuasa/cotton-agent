@@ -31,7 +31,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -49,7 +49,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from core import credentials, embedding_providers, providers
+from core import credentials, embedding_providers, model_cache, providers
 
 #: 状态点：绿=已配置，红=未配置（与截图一致，只用两个颜色，不引入"不确定"的第三态）
 DOT_ON, DOT_OFF = "●", "●"
@@ -162,6 +162,162 @@ def default_provider_name(kind: str = "llm") -> str:
     return kind_spec(kind).backend.default_provider()
 
 
+#: 模型下拉与它的候选浮层的样式。
+#:
+#: ★ 去掉原生箭头（`::drop-down` 宽度归零 + `::down-arrow` 无图），浮层改圆角白卡、
+#:   行高与内边距放大、滚动条收细 —— 与主窗口里那个候选浮层（`PickerPopup`）
+#:   同一套观感。原生 QComboBox 的弹出列表是**顶层窗口**，不设透明底就画不出圆角，
+#:   所以下面还要给 `view().window()` 设 `WA_TranslucentBackground`（见 `ModelCombo`）。
+MODEL_COMBO_QSS = """
+QComboBox#modelCombo {
+    background: #FFFFFF;
+    border: 1px solid #E0E0E4;
+    border-radius: 6px;
+    padding: 5px 10px;
+    font-size: 12px;
+    color: #1f2328;
+}
+QComboBox#modelCombo:hover { border-color: #C9CDD4; }
+QComboBox#modelCombo:focus { border-color: #8AB8E8; }
+QComboBox#modelCombo::drop-down { width: 0px; border: none; }
+QComboBox#modelCombo::down-arrow { image: none; width: 0px; height: 0px; }
+
+QComboBox#modelCombo QAbstractItemView {
+    background: #FFFFFF;
+    border: 1px solid #E3E5E8;
+    border-radius: 8px;
+    padding: 6px;
+    outline: none;
+    selection-background-color: #F2F3F5;
+    selection-color: #1f2328;
+}
+QComboBox#modelCombo QAbstractItemView::item {
+    min-height: 30px;
+    padding: 4px 10px;
+    border-radius: 6px;
+    color: #1f2328;
+}
+QComboBox#modelCombo QAbstractItemView::item:hover { background: #F2F3F5; }
+QComboBox#modelCombo QAbstractItemView::item:selected { background: #F2F3F5; }
+
+QComboBox#modelCombo QScrollBar:vertical {
+    background: transparent; width: 8px; margin: 4px 2px 4px 0;
+}
+QComboBox#modelCombo QScrollBar::handle:vertical {
+    background: #D4D8DE; border-radius: 4px; min-height: 28px;
+}
+QComboBox#modelCombo QScrollBar::handle:vertical:hover { background: #BFC5CD; }
+QComboBox#modelCombo QScrollBar::add-line:vertical,
+QComboBox#modelCombo QScrollBar::sub-line:vertical { height: 0; }
+QComboBox#modelCombo QScrollBar::add-page:vertical,
+QComboBox#modelCombo QScrollBar::sub-page:vertical { background: transparent; }
+"""
+
+
+class _ModelFetch(QThread):
+    """后台拉模型清单（`GET /models`）。**界面线程不碰网络。**"""
+
+    done = pyqtSignal(bool, str, list)
+
+    def __init__(self, kind: str, name: str, parent=None) -> None:
+        super().__init__(parent)
+        self._kind = kind
+        self._name = name
+
+    def run(self) -> None:                                    # noqa: D102
+        try:
+            backend = kind_spec(self._kind).backend
+            ok, msg, ids = backend.list_models(self._name)
+        except Exception as e:                                # noqa: BLE001
+            ok, msg, ids = False, f"{type(e).__name__}: {e}", []
+        self.done.emit(bool(ok), str(msg), list(ids or []))
+
+
+class ModelCombo(QComboBox):
+    """可选可编辑的模型下拉：**打开就有候选**，缓存旧了在后台刷新。
+
+    【为什么不是原生 QComboBox 直接给个列表】
+      原生弹出列表是**顶层窗口**，样式与主界面格格不入（直角、系统滚动条、
+      鼠标悬停的蓝底）；而本项目的候选浮层有一套既有观感（圆角白卡 + 细滚动条）。
+      这里用 QSS 把字段与浮层都改成那套观感，并且去掉了原生箭头。
+
+    【清单从哪来】
+      构造时读 `core.model_cache` 的缓存（**不联网**，所以打开设置不会卡）；
+      用户**点开下拉**那一刻，若缓存缺失或过期，起一个后台线程去拉，
+      拉回来就地刷新。这样"配置过一次之后随时能选"，而不是每次先点「测试连接」。
+    """
+
+    def __init__(self, kind: str = "llm", parent=None) -> None:
+        super().__init__(parent)
+        self.setObjectName("modelCombo")
+        self.setEditable(True)
+        self.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.setStyleSheet(MODEL_COMBO_QSS)
+        self.setToolTip("打开即可选择该端点提供的模型；也可以直接输入型号名。"
+                        "清单缓存自上次拉取，点开时会自动刷新。")
+        if self.lineEdit() is not None:
+            self.lineEdit().setPlaceholderText(
+                "点这里选择模型，或直接输入，例如 "
+                + ("BAAI/bge-large-zh-v1.5" if kind == "embedding" else "qwen3.7-plus"))
+        self._kind = kind
+        self._provider = ""
+        self._fetch: _ModelFetch | None = None
+
+        # ★ 浮层是顶层窗口：要圆角就必须让窗口四角透明，否则会渲染出黑块。
+        #   光设 `WA_TranslucentBackground` 还不够 —— 承载列表的那个容器
+        #   （`QComboBoxPrivateContainer`）自己会刷一层不透明底，把圆角盖成直角。
+        #   所以容器也要显式透明，圆角由列表自身的 QSS 画。
+        view = self.view()
+        view.setStyleSheet(MODEL_COMBO_QSS)
+        win = view.window()
+        if win is not None:
+            win.setWindowFlags(Qt.WindowType.Popup
+                               | Qt.WindowType.FramelessWindowHint
+                               | Qt.WindowType.NoDropShadowWindowHint)
+            win.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+            win.setStyleSheet("background: transparent; border: none;")
+
+    # ---- 数据 ----
+
+    def set_provider(self, kind: str, name: str) -> None:
+        """告诉它"现在编辑的是哪个服务商"，后台刷新才知道向谁要清单。"""
+        self._kind = kind or self._kind
+        self._provider = str(name or "")
+
+    def set_models(self, ids) -> None:
+        """填入候选清单，**保留当前填的名字**（不清空、不强制改选）。"""
+        current = self.currentText().strip()
+        self.blockSignals(True)
+        self.clear()
+        self.addItems([str(i) for i in (ids or []) if str(i).strip()])
+        if current:
+            self.setCurrentText(current)
+        self.blockSignals(False)
+
+    def models(self) -> list[str]:
+        return [self.itemText(i) for i in range(self.count())]
+
+    # ---- 打开下拉时按需刷新 ----
+
+    def showPopup(self) -> None:                              # noqa: N802
+        """点开那一刻决定要不要刷新；**刷新在后台**，不挡着选。
+
+        ★ 只在"有服务商名 + 缓存缺失或过期"时才拉。新建直接弹出的服务商还没落库、
+          没有密钥，拉也拉不到，反而会白等一次超时。
+        """
+        if (self._provider
+                and model_cache.is_stale(self._kind, self._provider)
+                and not (self._fetch is not None and self._fetch.isRunning())):
+            self._fetch = _ModelFetch(self._kind, self._provider, parent=self)
+            self._fetch.done.connect(self._on_fetched)
+            self._fetch.start()
+        super().showPopup()
+
+    def _on_fetched(self, ok: bool, _msg: str, ids: list) -> None:
+        if ok and ids:
+            self.set_models(ids)
+
+
 class ProviderEditDialog(QDialog):
     """新增/编辑一个服务商（`kind` 决定是模型还是 Embedding）。
 
@@ -217,20 +373,14 @@ class ProviderEditDialog(QDialog):
         url_row.addWidget(self._btn_test)
         form.addRow(QLabel("接口地址:"), url_row)
 
-        # ★ 默认模型改成**可选可编辑下拉**：点「测试连接」拿到该端点的模型清单后填进来，
-        #   也可以直接手输（有些网关的 /models 不全）。
-        #   ★ 构造时**不发网络请求** —— 只有用户点「测试连接」才去拉，否则打开设置就会卡、
-        #     而且守卫里构造对话框也会变成联网测试。
-        self._model = QComboBox()
-        self._model.setEditable(True)
-        self._model.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        # ★ 默认模型：**可选可编辑下拉**，清单来自缓存（`core/model_cache`），
+        #   所以**打开对话框就有候选可点**，不必先点「测试连接」。
+        #   缓存缺/旧时在**打开下拉那一刻**后台刷新（见 `showPopup`），不阻塞界面；
+        #   构造对话框全程**不发网络请求**（否则开设置会卡，守卫也会变成联网测试）。
+        self._model = ModelCombo(kind)
+        self._model.set_provider(kind, str(spec.get("name") or ""))
         self._model.setCurrentText(str(spec.get("default_model", "") or ""))
-        if self._model.lineEdit() is not None:
-            self._model.lineEdit().setPlaceholderText(
-                "点「测试连接」拉取模型清单，或直接输入，例如 "
-                + ("BAAI/bge-large-zh-v1.5" if kind == "embedding" else "qwen3.7-plus"))
-        self._model.setToolTip("先点「测试连接」可以下拉选择该端点实际提供的模型；"
-                               "也可以直接输入。")
+        self._model.set_models(model_cache.get(kind, str(spec.get("name") or "")))
         form.addRow(QLabel("默认模型:"), self._model)
 
         # API 密钥：只写。留空 = 不修改
@@ -306,14 +456,8 @@ class ProviderEditDialog(QDialog):
                                      % (COLOR_ON if ok else COLOR_OFF))
 
     def _fill_models(self, ids: list[str]) -> None:
-        """把模型清单填进下拉框，**保留用户当前填的名字**（不清空、不强制改选）。"""
-        current = self._model.currentText().strip()
-        self._model.blockSignals(True)
-        self._model.clear()
-        self._model.addItems(ids)
-        if current:
-            self._model.setCurrentText(current)
-        self._model.blockSignals(False)
+        """把模型清单填进下拉框（保留当前填的名字）。逻辑在 `ModelCombo.set_models`。"""
+        self._model.set_models(ids)
 
     def _on_ok(self) -> None:
         v = self.values()
