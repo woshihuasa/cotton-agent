@@ -49,6 +49,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from config import resource_path
 from core import credentials, embedding_providers, model_cache, providers
 
 #: 状态点：绿=已配置，红=未配置（与截图一致，只用两个颜色，不引入"不确定"的第三态）
@@ -162,13 +163,18 @@ def default_provider_name(kind: str = "llm") -> str:
     return kind_spec(kind).backend.default_provider()
 
 
-#: 模型下拉与它的候选浮层的样式。
+#: 模型下拉与它候选浮层的样式（**函数**，因为要注入图标绝对路径）。
 #:
-#: ★ 去掉原生箭头（`::drop-down` 宽度归零 + `::down-arrow` 无图），浮层改圆角白卡、
-#:   行高与内边距放大、滚动条收细 —— 与主窗口里那个候选浮层（`PickerPopup`）
-#:   同一套观感。原生 QComboBox 的弹出列表是**顶层窗口**，不设透明底就画不出圆角，
-#:   所以下面还要给 `view().window()` 设 `WA_TranslucentBackground`（见 `ModelCombo`）。
-MODEL_COMBO_QSS = """
+#: ★ 保留一个**可见的下拉箭头**：它是"这里可以点开"的唯一提示。
+#:   第一版把 `::drop-down` 宽度归零，本意是"去掉难看的原生三角"，
+#:   结果整个下拉变成纯输入框 —— 用户以为没得选、只能手输。**少一个可点入口，
+#:   等于少一个功能**。现在改成：留 22px 的箭头区，三角形换成项目自带的
+#:   `ui/icons/arrow_down.svg`（与其它下拉同一份资源）。
+#:
+#: ★ 浮层是顶层窗口，要圆角就得让窗口四角透明（见 `ModelCombo`）。
+def model_combo_qss() -> str:
+    arrow = str(resource_path("ui/icons/arrow_down.svg")).replace("\\", "/")
+    return """
 QComboBox#modelCombo {
     background: #FFFFFF;
     border: 1px solid #E0E0E4;
@@ -179,8 +185,19 @@ QComboBox#modelCombo {
 }
 QComboBox#modelCombo:hover { border-color: #C9CDD4; }
 QComboBox#modelCombo:focus { border-color: #8AB8E8; }
-QComboBox#modelCombo::drop-down { width: 0px; border: none; }
-QComboBox#modelCombo::down-arrow { image: none; width: 0px; height: 0px; }
+
+/* 箭头区：保留可点宽度，只把原生三角换成项目自带的图 */
+QComboBox#modelCombo::drop-down {
+    width: 22px;
+    border: none;
+    background: transparent;
+}
+QComboBox#modelCombo::drop-down:hover { background: #F2F3F5; }
+QComboBox#modelCombo::down-arrow {
+    image: url("%(arrow)s");
+    width: 10px;
+    height: 6px;
+}
 
 QComboBox#modelCombo QAbstractItemView {
     background: #FFFFFF;
@@ -211,7 +228,11 @@ QComboBox#modelCombo QScrollBar::add-line:vertical,
 QComboBox#modelCombo QScrollBar::sub-line:vertical { height: 0; }
 QComboBox#modelCombo QScrollBar::add-page:vertical,
 QComboBox#modelCombo QScrollBar::sub-page:vertical { background: transparent; }
-"""
+""" % {"arrow": arrow}
+
+
+#: 兼容旧引用（常量形式）—— 内容同 `model_combo_qss()`。
+MODEL_COMBO_QSS = model_combo_qss()
 
 
 class _ModelFetch(QThread):
@@ -219,22 +240,39 @@ class _ModelFetch(QThread):
 
     done = pyqtSignal(bool, str, list)
 
-    def __init__(self, kind: str, name: str, parent=None) -> None:
+    def __init__(self, kind: str, *, name: str = "", url: str = "",
+                 key: str = "", parent=None) -> None:
         super().__init__(parent)
         self._kind = kind
         self._name = name
+        # ★ 新建服务商还没落库、凭据层里也没有它的键，只能按"当前填的端点+密钥"拉。
+        #   这条路径就是为了不让人卡在"没有清单 → 不能选模型 → 不能保存"上。
+        self._url = url
+        self._key = key
 
     def run(self) -> None:                                    # noqa: D102
         try:
             backend = kind_spec(self._kind).backend
-            ok, msg, ids = backend.list_models(self._name)
+            if self._url:
+                ok, msg, ids = backend.list_models_at(self._url, self._key)
+            else:
+                ok, msg, ids = backend.list_models(self._name)
         except Exception as e:                                # noqa: BLE001
             ok, msg, ids = False, f"{type(e).__name__}: {e}", []
         self.done.emit(bool(ok), str(msg), list(ids or []))
 
 
 class ModelCombo(QComboBox):
-    """可选可编辑的模型下拉：**打开就有候选**，缓存旧了在后台刷新。
+    """**只能从下拉里选**的模型控件：候选来自缓存，缺了就按需拉取。
+
+    ★ 2026-11-01 改：此前是可编辑的（允许手输型号）。用户反馈 —— 各家模型名格式
+      不一样、手抄必然出错，而错了要到第一次生成才暴露；既然候选能自动拉，
+      就没有理由再让人手打。于是 `setEditable(False)`：**只能选，不能输入**。
+
+    ★ 代价与对策：不能手输，就等于"没清单时寸步难行"。所以
+      · 清单来自 `core/model_cache`（上次拉到的），打开就有；
+      · 旁边配一个「拉取清单」按钮，用**当前填的地址与密钥**直接拉
+        （`list_models_at`）—— 新建服务商还没落库也能拉，不会卡死在这个框上。
 
     【为什么不是原生 QComboBox 直接给个列表】
       原生弹出列表是**顶层窗口**，样式与主界面格格不入（直角、系统滚动条、
@@ -250,15 +288,14 @@ class ModelCombo(QComboBox):
     def __init__(self, kind: str = "llm", parent=None) -> None:
         super().__init__(parent)
         self.setObjectName("modelCombo")
-        self.setEditable(True)
+        # ★ 只能选、不能输入：模型名由端点提供，手抄只会制造"看起来对、其实错"的配置
+        self.setEditable(False)
         self.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         self.setStyleSheet(MODEL_COMBO_QSS)
-        self.setToolTip("打开即可选择该端点提供的模型；也可以直接输入型号名。"
-                        "清单缓存自上次拉取，点开时会自动刷新。")
-        if self.lineEdit() is not None:
-            self.lineEdit().setPlaceholderText(
-                "点这里选择模型，或直接输入，例如 "
-                + ("BAAI/bge-large-zh-v1.5" if kind == "embedding" else "qwen3.7-plus"))
+        self.setToolTip("从下拉里选择该端点提供的模型。清单来自上次拉取，"
+                        "旁边「拉取清单」可以重新拉一次。")
+        self._placeholder_hint = ("BAAI/bge-large-zh-v1.5" if kind == "embedding"
+                                  else "qwen3.7-plus")
         self._kind = kind
         self._provider = ""
         self._fetch: _ModelFetch | None = None
@@ -284,15 +321,34 @@ class ModelCombo(QComboBox):
         self._kind = kind or self._kind
         self._provider = str(name or "")
 
-    def set_models(self, ids) -> None:
-        """填入候选清单，**保留当前填的名字**（不清空、不强制改选）。"""
-        current = self.currentText().strip()
+    def set_models(self, ids, prefer: str = "") -> None:
+        """填入候选清单并选中 `prefer`（缺省用当前值）。
+
+        ★ `prefer` 是**已配置的模型**：它可能不在这批候选里（换了端点、或这次没
+          拉到它），但那不代表它被废弃了 —— 直接让第一个候选顶上去，等于用户
+          什么都没干，配置就被悄悄改掉了。
+        """
+        current = (str(prefer or "") or self.currentText()).strip()
+        items = [str(i) for i in (ids or []) if str(i).strip()]
+        # ★ 已配置的模型即使不在清单里也要留着：它可能只是这次没拉到，
+        #   直接丢掉等于把这个服务商悄悄改成"没选模型"。
+        if current and current not in items:
+            items.insert(0, current)
         self.blockSignals(True)
         self.clear()
-        self.addItems([str(i) for i in (ids or []) if str(i).strip()])
+        self.addItems(items)
         if current:
             self.setCurrentText(current)
+        elif items:
+            self.setCurrentIndex(0)      # 有候选却没选 → 默认选第一个，不留空
         self.blockSignals(False)
+
+    def has_choices(self) -> bool:
+        return self.count() > 0
+
+    def placeholder(self) -> str:
+        """空清单时显示在框里的提示文字（不是输入框的水印 —— 现在不能输入）。"""
+        return "（先点「拉取清单」）" + self._placeholder_hint
 
     def models(self) -> list[str]:
         return [self.itemText(i) for i in range(self.count())]
@@ -308,7 +364,7 @@ class ModelCombo(QComboBox):
         if (self._provider
                 and model_cache.is_stale(self._kind, self._provider)
                 and not (self._fetch is not None and self._fetch.isRunning())):
-            self._fetch = _ModelFetch(self._kind, self._provider, parent=self)
+            self._fetch = _ModelFetch(self._kind, name=self._provider, parent=self)
             self._fetch.done.connect(self._on_fetched)
             self._fetch.start()
         super().showPopup()
@@ -379,9 +435,24 @@ class ProviderEditDialog(QDialog):
         #   构造对话框全程**不发网络请求**（否则开设置会卡，守卫也会变成联网测试）。
         self._model = ModelCombo(kind)
         self._model.set_provider(kind, str(spec.get("name") or ""))
-        self._model.setCurrentText(str(spec.get("default_model", "") or ""))
-        self._model.set_models(model_cache.get(kind, str(spec.get("name") or "")))
-        form.addRow(QLabel("默认模型:"), self._model)
+        # ★ 先填候选、再选已配置的那个（`prefer` 会把它留在列表里）。
+        #   反过来做的话，`setCurrentText` 在空列表上无效，随后填候选会把第一个顶上来。
+        _configured = str(spec.get("default_model", "") or "")
+        self._model.set_models(model_cache.get(kind, str(spec.get("name") or "")),
+                               prefer=_configured)
+        self._model.setCurrentText(_configured) if _configured else None
+
+        model_row = QHBoxLayout()
+        model_row.setContentsMargins(0, 0, 0, 0)
+        model_row.addWidget(self._model, 1)
+        self._btn_models = QPushButton("拉取清单")
+        self._btn_models.setObjectName("cardBtn")
+        self._btn_models.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_models.setToolTip(
+            "用上面填的接口地址与密钥拉取模型清单（新建服务商也能用，不必先保存）")
+        self._btn_models.clicked.connect(self._on_refresh_models)
+        model_row.addWidget(self._btn_models)
+        form.addRow(QLabel("默认模型:"), model_row)
 
         # API 密钥：只写。留空 = 不修改
         self._key = QLineEdit()
@@ -455,6 +526,53 @@ class ProviderEditDialog(QDialog):
         self._test_msg.setStyleSheet("font-size:11px; color:%s;"
                                      % (COLOR_ON if ok else COLOR_OFF))
 
+    # ---- 拉取模型清单（新建也能用）----
+
+    def _on_refresh_models(self) -> None:
+        """拉一次模型清单。
+
+        ★ 优先用**当前填的地址与密钥**：新建服务商还没落库、凭据层里也没有它的键，
+          只有这条路能走。不提供它，"只能选不能输"就会把用户卡死
+          （没清单 → 不能选 → 不能保存 → 永远拿不到清单）。
+        """
+        name = self.values()["name"]
+        url = self._url.text().strip()
+        key = self._key.text()
+        saved_key = bool(name) and credentials.has_key(
+            self._ks.backend.key_name(name))
+        if url.startswith("https://") and key:
+            self._start_model_fetch(url=url, key=key)
+        elif name and saved_key:
+            self._start_model_fetch(name=name)
+        else:
+            self._test_msg.setText(
+                "✗ 先填「接口地址」与「API 密钥」（或先保存一次），才能拉到模型清单")
+            self._test_msg.setStyleSheet(f"font-size:11px; color:{COLOR_OFF};")
+
+    def _start_model_fetch(self, *, name: str = "", url: str = "",
+                           key: str = "") -> None:
+        """后台拉清单。**界面线程不碰网络**，按钮在拉取期间置灰防重复点。"""
+        self._btn_models.setEnabled(False)
+        self._test_msg.setText("正在拉取模型清单…")
+        self._test_msg.setStyleSheet("font-size:11px; color:#8a919b;")
+        self._model_fetch = _ModelFetch(self.kind, name=name, url=url,
+                                        key=key, parent=self)
+        self._model_fetch.done.connect(self._on_models_fetched)
+        self._model_fetch.start()
+
+    def _on_models_fetched(self, ok: bool, msg: str, ids: list) -> None:
+        self._btn_models.setEnabled(True)
+        if ok and ids:
+            self._model.set_models(ids)
+            self._test_msg.setText(f"✓ {msg}")
+            self._test_msg.setStyleSheet(f"font-size:11px; color:{COLOR_ON};")
+            return
+        text = msg if ok else ("✗ " + msg)
+        if ok and not ids:
+            text = "✗ 该端点没有返回可用的模型"
+        self._test_msg.setText(text)
+        self._test_msg.setStyleSheet(f"font-size:11px; color:{COLOR_OFF};")
+
     def _fill_models(self, ids: list[str]) -> None:
         """把模型清单填进下拉框（保留当前填的名字）。逻辑在 `ModelCombo.set_models`。"""
         self._model.set_models(ids)
@@ -467,6 +585,14 @@ class ProviderEditDialog(QDialog):
         if not self.builtin and not v["base_url"].startswith("https://"):
             QMessageBox.warning(self, "接口地址不合规",
                                 "接口地址必须以 https:// 开头。\n（明文 http 会以明文传输密钥）")
+            return
+        # ★ 这个框现在**只能选、不能输**：清单空着就说明还没拉到，必须挡住，
+        #   否则会存进一个空模型，等到第一次生成才报错。
+        if not self._model.has_choices():
+            QMessageBox.warning(
+                self, "还没有可选模型",
+                "模型只能从清单里选。先点「拉取清单」拿到该端点提供的模型，再选一个。\n\n"
+                "拉不到通常是：接口地址写错、密钥无效，或该端点不提供 /models。")
             return
         if not v["default_model"]:
             QMessageBox.warning(self, "缺少信息", "默认模型不能为空。")

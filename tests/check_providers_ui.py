@@ -34,6 +34,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PyQt6.QtWidgets import QApplication, QGroupBox, QLineEdit   # noqa: E402
 
 from core import credentials, providers                          # noqa: E402
+from ui import provider_editor                                   # noqa: E402
 from ui.provider_editor import (                                 # noqa: E402
     ProviderCard,
     ProviderEditDialog,
@@ -188,24 +189,44 @@ def main() -> int:
             type(dlg._model).__name__)
     c.check("★ 下拉用自己的候选浮层（`ModelCombo`，非原生样式）",
             hasattr(dlg._model, "set_models") and hasattr(dlg._model, "showPopup"))
-    c.check("★ 下拉**可编辑**（网关的 /models 不全时仍能手输）",
-            dlg._model.isEditable() is True)
-    c.check("构造时候选来自**缓存**（沙箱里没有缓存 → 0 条，且不联网）",
-            dlg._model.count() == 0, str(dlg._model.count()))
+    c.check("★ 下拉**不可编辑**（只能从清单里选，不允许手输）",
+            dlg._model.isEditable() is False)
+    c.check("★ 保留可见的下拉箭头（宽度 > 0，否则用户不知道能点开）",
+            "width: 22px" in provider_editor.model_combo_qss()
+            and "arrow_down.svg" in provider_editor.model_combo_qss())
+    c.check("★ 旁边有「拉取清单」按钮（空清单时唯一的出路）",
+            hasattr(dlg, "_btn_models") and "拉取清单" in dlg._btn_models.text())
+    configured = str(dlg.spec.get("default_model") or "")
+    c.check("★ 沙箱无缓存 → 候选里**只有已配置的那一个**（不联网）",
+            dlg._model.models() == ([configured] if configured else []),
+            str(dlg._model.models()))
 
-    before = dlg._model.currentText()
     dlg._fill_models(["qwen3.7-plus", "qwen-max", "deepseek-v4-pro"])
-    c.check("填充后三项都在", dlg._model.count() == 3, str(dlg._model.count()))
-    c.check("★ 填充**不覆盖**用户已填的名字",
-            dlg._model.currentText() == before, f"{before} → {dlg._model.currentText()}")
+    c.check("填充后三项都在，且已配置的那个**没被挤掉**",
+            {"qwen3.7-plus", "qwen-max", "deepseek-v4-pro"} <= set(dlg._model.models()),
+            str(dlg._model.models()))
+    c.check("★ 填充**不改变当前选中**的那个",
+            dlg._model.currentText() == configured,
+            f"{configured} → {dlg._model.currentText()}")
 
     dlg._model.setCurrentText("qwen-max")
     c.check("★ 下拉里选一个 → `values()` 跟着变",
             dlg.values()["default_model"] == "qwen-max", dlg.values()["default_model"])
 
-    dlg._model.setCurrentText("手输的模型名")
-    c.check("手输的名字也能取到（不强制从清单里选）",
-            dlg.values()["default_model"] == "手输的模型名")
+    dlg._model.setCurrentText("不在清单里的名字")
+    c.check("★ 反向：清单外的名字**选不进去**（这正是「只能选」的含义）",
+            dlg.values()["default_model"] == "qwen-max",
+            dlg.values()["default_model"])
+
+    # ★ 已配置的型号即使不在新清单里，也不能被第一个候选顶掉
+    d_keep = ProviderEditDialog({"name": "qwen", "label": "q",
+                                 "base_url": "https://x/v1",
+                                 "default_model": "我的旧型号", "builtin": True},
+                                is_new=False)
+    c.check("★ 已配置但不在缓存里的型号：仍被选中，且留在候选里",
+            d_keep._model.currentText() == "我的旧型号"
+            and "我的旧型号" in d_keep._model.models(),
+            f"{d_keep._model.currentText()} / {d_keep._model.models()}")
 
     # 构造期间不得联网：把 list_models 换成会炸的桩，构造一个对话框
     real_list = providers.list_models

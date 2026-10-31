@@ -452,6 +452,16 @@ def rerank_url() -> str:
 # 拉模型清单 / 测试连接（界面「测试连接」用；复用 providers 的语义）
 # ---------------------------------------------------------------------------
 
+def list_models_at(base_url: str, api_key: str, *,
+                   timeout_s: float = 20.0) -> tuple[bool, str, list[str]]:
+    """按**端点 + 密钥**拉模型清单（新建服务商还没落库时用）。
+
+    与 LLM 那边同一套实现 —— 只是换了默认模型名，没必要写两遍。
+    """
+    from core import providers as _llm
+    return _llm.list_models_at(base_url, api_key, timeout_s=timeout_s)
+
+
 def list_models(name: str, *, timeout_s: float = 20.0
                 ) -> tuple[bool, str, list[str]]:
     """拉一次 `GET /models`，返回 `(ok, 说明, 模型 id 列表)`。

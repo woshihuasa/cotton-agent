@@ -654,6 +654,46 @@ def set_default(name: str) -> None:
     reload_config()
 
 
+def list_models_at(base_url: str, api_key: str, *,
+                   timeout_s: float = 20.0) -> tuple[bool, str, list[str]]:
+    """按**端点 + 密钥**拉模型清单（不查登记表、不读凭据层）。
+
+    ★ 为什么需要它：新建服务商时还没落库、也还没有凭据层里的键，
+      `list_models(name)` 那种"按名字查"的入口用不了。而界面上改为
+      **只能从下拉里选模型**之后，必须先能把清单拉出来，否则用户会被卡住
+      （不能手输 → 没有可选 → 不能保存 → 永远拿不到清单）。
+
+    失败分类与 `list_models()` 同一套（401/404/429/超时/网络）。
+    """
+    url = str(base_url or "").strip()
+    key = str(api_key or "").strip()
+    if not url:
+        return False, "接口地址为空", []
+    if not key:
+        return False, "未配置密钥", []
+    try:
+        from openai import OpenAI
+        cli = OpenAI(api_key=key, base_url=url, timeout=timeout_s)
+        page = cli.models.list()
+        ids = [str(getattr(m, "id", "")) for m in getattr(page, "data", [])]
+        ids = [i for i in ids if i]
+        return True, f"连接正常，可用模型 {len(ids)} 个", ids
+    except Exception as e:                                   # noqa: BLE001
+        status = getattr(e, "status_code", None)
+        if status == 401:
+            return False, "密钥无效，或与端点/空间不匹配（401）", []
+        if status == 404:
+            return False, "端点地址不通（404）", []
+        if status == 429:
+            return False, "被限流（429），稍后重试", []
+        name_err = type(e).__name__.lower()
+        if "timeout" in name_err:
+            return False, f"连接超时（>{timeout_s:.0f}s）", []
+        if "connection" in name_err:
+            return False, "网络不通，或端点地址错误", []
+        return False, f"{type(e).__name__}: {str(e)[:120]}", []
+
+
 def list_models(name: str, *, timeout_s: float = 20.0
                 ) -> tuple[bool, str, list[str]]:
     """拉一次 `GET /models`（**不消耗生成 token**），返回 `(ok, 说明, 模型 id 列表)`。

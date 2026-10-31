@@ -601,14 +601,18 @@ def main() -> int:                                              # noqa: C901
                 dlg._make_default.text())
         c.check("★ 当前默认是 gw-ui → 其编辑页勾选框已选中",
                 dlg._make_default.isChecked() is True)
-        c.check("★★ 模型同样是**可选可编辑下拉**（不是纯文本框）",
-                isinstance(dlg._model, QComboBox) and dlg._model.isEditable())
-        c.check("★ 构造时不预填候选（打开设置**不联网**）", dlg._model.count() == 0)
+        c.check("★★ 模型同样是下拉，且**只能选不能输**（与模型页同一套 `ModelCombo`）",
+                isinstance(dlg._model, QComboBox) and not dlg._model.isEditable())
+        c.check("★ 有「拉取清单」按钮（空清单时唯一的出路）",
+                hasattr(dlg, "_btn_models") and "拉取清单" in dlg._btn_models.text())
+        c.check("★ 沙箱无缓存 → 候选里只有已配置的那个（不联网）",
+                dlg._model.models() == ["embed-ui"], str(dlg._model.models()))
         before = dlg._model.currentText()
         dlg._fill_models(["embed-x", "embed-y"])
-        c.check("★ 填充不覆盖用户已填的名字",
-                dlg._model.currentText() == before == "embed-ui",
-                f"{before} → {dlg._model.currentText()}")
+        c.check("★ 填充不改变当前选中的模型，且把它留在候选里",
+                dlg._model.currentText() == before == "embed-ui"
+                and "embed-ui" in dlg._model.models(),
+                f"{before} → {dlg._model.currentText()} / {dlg._model.models()}")
         c.check("★ 自定义项接口地址可编辑", dlg._url.isEnabled() is True)
         dlg_builtin = ProviderEditDialog(ep.all_specs()["siliconflow"],
                                          is_new=False, kind="embedding")
