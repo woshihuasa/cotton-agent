@@ -1528,14 +1528,14 @@ class CottonAgentWindow(QMainWindow):
             self._notify_drawer.setVisible(False)
 
     def _open_schedule_dialog(self) -> None:
-        """打开推送设置（城市 / 开关 / 立即运行）。
+        """从抽屉的齿轮打开设置，并直接落在「推送」那一页。
 
-        ★ 调度器还没起来也要能打开：窗口里会说明原因，比把按钮禁掉更好，
-          因为用户至少看得到"还没启动"而不是一个点不动的按钮。
+        ★ 齿轮只是快捷键，不是第二份配置：打开的就是设置窗口的同一页。
+          调度器还没起来也要能打开 —— 那一页会说明原因，比把按钮禁掉更好。
         """
-        from ui.schedule_dialog import ScheduleDialog
-        dlg = ScheduleDialog(getattr(self, "_scheduler", None), parent=self)
-        dlg.exec()
+        dialog = SettingsDialog(self, scheduler=getattr(self, "_scheduler", None),
+                                page="推送")
+        dialog.exec()
         # 设置里可能刚手动跑过一次，回来刷新一下角标与列表
         self._refresh_notifications()
 
@@ -2125,7 +2125,7 @@ class CottonAgentWindow(QMainWindow):
 
     def _on_settings(self) -> None:
         """弹出设置对话框，允许修改 API Key。"""
-        dialog = SettingsDialog(self)
+        dialog = SettingsDialog(self, scheduler=getattr(self, "_scheduler", None))
         if dialog.exec():
             print("[UI] 配置已更新。")
             # 刷新内存中的配置（.env 已写入），使新 key 立即生效

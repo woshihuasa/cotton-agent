@@ -293,7 +293,7 @@ class SettingsDialog(QDialog):
     MAX_HEIGHT = 680
     MIN_HEIGHT = 420
 
-    def __init__(self, parent=None) -> None:
+    def __init__(self, parent=None, *, scheduler=None, page: str = "") -> None:
         super().__init__(parent)
         self.setWindowTitle("API 设置")
         # ★ 比原来宽：左侧多了 132px 导航栏，宽度不加的话右侧表单会被压扁
@@ -301,6 +301,12 @@ class SettingsDialog(QDialog):
         self.setMaximumWidth(780)
         self.setModal(True)
         self.setStyleSheet(DIALOG_STYLE)
+
+        #: 定时触发层的调度器（「推送」那一页要用）。None 表示还没启动，
+        #: 那一页会自己显示原因，而不是让整个设置打不开。
+        self._scheduler = scheduler
+        #: 打开时定位到哪一页（抽屉里的齿轮用它直接跳到「推送」）
+        self._want_page = page
 
         self._fit_to_screen()
         self._build_ui()
@@ -348,6 +354,29 @@ class SettingsDialog(QDialog):
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setWidget(page)
         return scroll
+
+    def _select_page(self, title: str) -> None:
+        """按导航项**文字**定位页 —— 用文字而不是索引，加页时不会错位。"""
+        text = str(title or "").strip()
+        if not text:
+            return
+        for i in range(self._nav.count()):
+            if self._nav.item(i).text() == text:
+                self._nav.setCurrentRow(i)
+                return
+
+    def _on_page_changed(self, row: int) -> None:
+        """切到「推送」时刷新面板。
+
+        ★ 必须刷：面板上的「下次运行」是时间相关的，设置窗口可能开很久；
+          而且用户可能刚在别处手动跑过一次。
+        """
+        panel = getattr(self, "_schedule_panel", None)
+        if panel is None:
+            return
+        item = self._nav.item(row)
+        if item is not None and item.text() == "推送":
+            panel.refresh()
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -462,18 +491,40 @@ class SettingsDialog(QDialog):
         web_layout.addWidget(self._web_status)
 
         # ── 装页：顺序即菜单顺序 ──
+        #
+        # ★ 「推送」放在这里而不是做成独立窗口：配置在用户的习惯里属于"设置"。
+        #   抽屉里的齿轮是快捷键 —— 打开同一个窗口并直接定位到这一页。
+        try:
+            from ui.schedule_panel import SchedulePanel
+            self._schedule_panel = SchedulePanel(self._scheduler)
+        except Exception as e:                          # noqa: BLE001
+            self._schedule_panel = None
+            err = QLabel(f"推送设置暂不可用：{type(e).__name__}: {e}")
+            err.setWordWrap(True)
+            err.setObjectName("formLabel")
+
         pages = [
             ("模型", self._make_page(prov_group)),
             ("Embedding", self._make_page(emb_group)),
             ("其他 API", self._make_page(other_group)),
             ("Web 服务", self._make_page(web_group)),
         ]
+        if self._schedule_panel is not None:
+            pages.append(("推送", self._make_page(self._schedule_panel)))
+        else:
+            pages.append(("推送", self._make_page(err)))
+
         for title, page in pages:
             self._nav.addItem(title)
             self._stack.addWidget(page)
 
         self._nav.currentRowChanged.connect(self._stack.setCurrentIndex)
         self._nav.setCurrentRow(0)          # 默认停在「模型」——最常改的一项
+        self._select_page(self._want_page)
+
+        # 每次切到「推送」都重新读一次状态：可能刚手动跑过一次，或上一次触发
+        # 已经过去，界面上的"下次运行"不该停在打开设置那一刻。
+        self._nav.currentRowChanged.connect(self._on_page_changed)
 
         # 右侧页面外留一点边距（左导航贴边，右内容不贴边）
         right_wrap = QWidget()

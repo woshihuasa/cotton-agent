@@ -1,13 +1,17 @@
 # -*- coding: utf-8 -*-
-"""推送设置 —— 触发层的控制面。
+"""推送设置面板 —— 触发层的控制面（作为「设置」里的一页嵌入）。
 
 【为什么需要它】在那之前，改城市、关掉某个任务、立刻跑一次，都只能手工编辑
 `schedule.json` 再重启。三个接口（`status` / `set_enabled` / `run_now`）早就
 写好了却**零调用点** —— 这种"半个功能"比没有更糟，因为它让人以为已经能配了。
 
-【改动怎么生效】三项都即时生效，不需要重启：
-    · 开关 → `Scheduler.set_enabled()`（写回 `schedule.json`）
-    · 城市/地区 → `Scheduler.set_inputs()`（写回，下一次触发就用新值）
+【为什么是「一页」而不是独立窗口】配置在用户的习惯里属于「设置」。做成独立窗口
+就多一个入口，而抽屉里那个齿轮是**快捷键**：点了直接打开设置并定位到这一页。
+一个实现、两个入口，不会出现"改了一边另一边没变"。
+
+【改动怎么生效】全部即时，没有保存按钮：
+    · 开关 → `Scheduler.set_enabled()`
+    · 城市/地区 → `Scheduler.set_inputs()`（失焦或回车即写回）
     · 立即运行 → `Scheduler.run_now()`（不影响定时状态）
   正在跑的那一轮不会被改，改动从下一次判定开始算。
 
@@ -19,7 +23,6 @@ from __future__ import annotations
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QCheckBox,
-    QDialog,
     QFormLayout,
     QFrame,
     QHBoxLayout,
@@ -30,8 +33,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-DIALOG_STYLE = """
-QDialog { background-color: #F7F7F8; }
+PANEL_STYLE = """
 QLabel#schedHint { font-size: 11px; color: #8A8A8E; }
 QLabel#schedSection { font-size: 12px; font-weight: 600; color: #1f1f1f; }
 QFrame#schedRow {
@@ -39,7 +41,7 @@ QFrame#schedRow {
     border: 1px solid #E8E8EC;
     border-radius: 8px;
 }
-QLabel#schedTitle { font-size: 13px; font-weight: 600; color: #1f1f1f; }
+QCheckBox#schedTitle { font-size: 13px; font-weight: 600; color: #1f1f1f; }
 QLabel#schedMeta  { font-size: 11px; color: #8A8A8E; }
 QLabel#schedState { font-size: 11px; color: #4A4A4E; }
 QLineEdit#schedEdit {
@@ -49,6 +51,7 @@ QLineEdit#schedEdit {
     padding: 5px 8px;
     font-size: 12px;
 }
+QLineEdit#schedEdit:disabled { background-color: #F2F2F4; color: #9A9A9E; }
 QPushButton#schedRun {
     background-color: #EAF3FF;
     border: 1px solid #B6D6F5;
@@ -59,29 +62,19 @@ QPushButton#schedRun {
 }
 QPushButton#schedRun:hover { background-color: #DCEBFF; }
 QPushButton#schedRun:disabled { color: #AAAAAE; border-color: #E4E4E8; }
-QPushButton#schedClose {
-    background-color: #FFFFFF;
-    border: 1px solid #E0E0E4;
-    border-radius: 6px;
-    font-size: 12px;
-    padding: 5px 16px;
-}
-QPushButton#schedClose:hover { background-color: #F0F0F2; }
 """
 
 
-class ScheduleDialog(QDialog):
-    """触发层的设置窗口。**改动即时生效**，没有"保存"按钮。"""
+class SchedulePanel(QWidget):
+    """「设置 → 推送」这一页。`scheduler` 为 None 时说明还没启动，只读提示。"""
 
-    def __init__(self, scheduler, parent: QWidget | None = None) -> None:
+    def __init__(self, scheduler=None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._sched = scheduler
-        self.setWindowTitle("推送设置")
-        self.resize(520, 380)
-        self.setStyleSheet(DIALOG_STYLE)
+        self.setStyleSheet(PANEL_STYLE)
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(16, 14, 16, 14)
+        root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(10)
 
         section = QLabel("地区")
@@ -95,12 +88,17 @@ class ScheduleDialog(QDialog):
         self._city.setObjectName("schedEdit")
         self._region = QLineEdit()
         self._region.setObjectName("schedEdit")
+        # ★ 失焦或回车即写回，不做"关闭时保存"：面板里其他两项都是即时的，
+        #   只有地区要等关窗，会让"取消"这个按钮的语义变得含糊。
+        self._city.editingFinished.connect(self._apply_inputs)
+        self._region.editingFinished.connect(self._apply_inputs)
         form.addRow("城市", self._city)
         form.addRow("地区", self._region)
         root.addLayout(form)
 
         hint = QLabel("城市用高德口径（如 阿克苏）；地区用于检索农事要点（如 阿克苏地区）。"
-                      "改完立即生效，从下一次触发开始算。")
+                      "这一页的改动**即时生效**、没有「保存」这一步——"
+                      "底部的按钮只负责关窗，按「取消」不会撤销已经改过的开关。")
         hint.setObjectName("schedHint")
         hint.setWordWrap(True)
         root.addWidget(hint)
@@ -109,33 +107,26 @@ class ScheduleDialog(QDialog):
         section2.setObjectName("schedSection")
         root.addWidget(section2)
 
-        self._rows_host = QWidget()
-        self._rows = QVBoxLayout(self._rows_host)
+        self._rows = QVBoxLayout()
         self._rows.setContentsMargins(0, 0, 0, 0)
         self._rows.setSpacing(8)
-        self._rows.addStretch(1)
-        root.addWidget(self._rows_host, 1)
+        root.addLayout(self._rows)
 
         self._status = QLabel("")
         self._status.setObjectName("schedHint")
         self._status.setWordWrap(True)
         root.addWidget(self._status)
+        root.addStretch(1)
 
-        bottom = QHBoxLayout()
-        bottom.addStretch(1)
-        close = QPushButton("关闭")
-        close.setObjectName("schedClose")
-        close.clicked.connect(self.accept)
-        bottom.addWidget(close)
-        root.addLayout(bottom)
-
-        self._row_widgets: list[tuple] = []
         self._load_from_scheduler()
 
     # ---- 读 ----
 
+    def refresh(self) -> None:
+        """外部改了调度器（比如刚跑完一次）之后重画。"""
+        self._load_from_scheduler()
+
     def _load_from_scheduler(self) -> None:
-        """把调度器的当前状态填进界面（打开时一次，之后按动作刷新）。"""
         if self._sched is None:
             self._status.setText("定时触发层还没启动，暂时不能配置。")
             self._city.setEnabled(False)
@@ -148,17 +139,15 @@ class ScheduleDialog(QDialog):
         self._rebuild_rows()
 
     def _rebuild_rows(self) -> None:
-        while self._rows.count() > 1:                 # 保留末尾的弹性
+        while self._rows.count():
             item = self._rows.takeAt(0)
             w = item.widget()
             if w is not None:
                 w.setParent(None)
                 w.deleteLater()
-        self._row_widgets.clear()
 
         for row in self._sched.status():
-            frame = self._make_row(row)
-            self._rows.insertWidget(self._rows.count() - 1, frame)
+            self._rows.addWidget(self._make_row(row))
 
     def _make_row(self, row: dict) -> QFrame:
         frame = QFrame()
@@ -188,8 +177,7 @@ class ScheduleDialog(QDialog):
         note = str(row.get("last_note") or "").strip()
         last = str(row.get("last_fired") or "").replace("T", " ")
         state = str(row.get("last_status") or "从未运行")
-        text = f"{state}　{last[:16]}" + (f"　{note}" if note else "")
-        label = QLabel(text)
+        label = QLabel(f"{state}　{last[:16]}" + (f"　{note}" if note else ""))
         label.setObjectName("schedState")
         label.setWordWrap(True)
         line.addWidget(label, 1)
@@ -213,9 +201,8 @@ class ScheduleDialog(QDialog):
         except Exception as e:                                # noqa: BLE001
             self._status.setText(f"写入失败：{type(e).__name__}: {e}")
             return
-        self._status.setText("已启用。" if enabled and ok else
-                             ("已停用。" if ok else "没有找到这个任务。"))
-        self._rebuild_rows()
+        self._status.setText(("已启用。" if enabled else "已停用。") if ok
+                             else "没有找到这个任务。")
 
     def _on_run(self, job_id: str) -> None:
         if self._sched is None:
@@ -229,9 +216,6 @@ class ScheduleDialog(QDialog):
             self._status.setText(f"已提交，run_id = {run_id}（结果稍后推到抽屉里）")
         else:
             self._status.setText("没能启动 —— 看状态栏或日志，那里会写卡在哪一步。")
-        self._rebuild_rows()
-
-    # ---- 地区输入：失焦即保存 ----
 
     def _apply_inputs(self) -> None:
         if self._sched is None:
@@ -243,10 +227,5 @@ class ScheduleDialog(QDialog):
         except Exception as e:                                # noqa: BLE001
             self._status.setText(f"写入失败：{type(e).__name__}: {e}")
             return
-        self._status.setText(f"已更新 {count} 个任务的城市/地区。")
-        self._rebuild_rows()
-
-    def accept(self) -> None:
-        """关闭前把地区输入落盘 —— 不必逼用户先点一下别处。"""
-        self._apply_inputs()
-        super().accept()
+        if count:
+            self._status.setText(f"已更新 {count} 个任务的城市/地区。")
