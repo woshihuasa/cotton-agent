@@ -24,8 +24,9 @@ from datetime import datetime
 from typing import Sequence
 
 from core.notifications import DEFAULT_KEEP_DAYS
+from config import resource_path
 
-from PyQt6.QtCore import QRectF, QSize, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QEvent, QRectF, QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap, QTransform
 from PyQt6.QtWidgets import (
     QApplication,
@@ -121,6 +122,42 @@ QFrame#notifySep { background-color: #EFEFF1; border: none; }
 /* 保留期说明：浅灰、居中，只在有消息时出现 */
 QLabel#notifyFootNote { font-size: 11px; color: #C2C2C7; }
 QLabel#notifyEmpty { font-size: 12px; color: #9A9A9E; }
+
+/* ── 滚动条：细、无箭头、指针不在抽屉里时隐去 ──
+   ★ 不用 `ScrollBarAlwaysOff` 来实现"自动隐藏"：那样拉不动，而且出现/消失时
+     视口宽度变化会让正文重新折行、整屏跳动。这里策略固定为 AlwaysOn，
+     只改滑块的透明度 —— 宽度一直是 8px，永远不重排。 */
+QScrollBar#notifyScrollBar:vertical {
+    background: transparent;
+    width: 8px;
+    margin: 0;
+    border: none;
+}
+QScrollBar#notifyScrollBar::handle:vertical {
+    background: transparent;
+    border-radius: 4px;
+    min-height: 28px;
+}
+QScrollBar#notifyScrollBar[hovered="true"]::handle:vertical {
+    background: rgba(0, 0, 0, 0.20);
+}
+QScrollBar#notifyScrollBar[hovered="true"]::handle:vertical:hover {
+    background: rgba(0, 0, 0, 0.38);
+}
+QScrollBar#notifyScrollBar::add-line:vertical,
+QScrollBar#notifyScrollBar::sub-line:vertical {
+    height: 0;
+    background: none;
+    border: none;
+}
+QScrollBar#notifyScrollBar::add-page:vertical,
+QScrollBar#notifyScrollBar::sub-page:vertical { background: none; }
+QScrollBar#notifyScrollBar::up-arrow:vertical,
+QScrollBar#notifyScrollBar::down-arrow:vertical {
+    width: 0;
+    height: 0;
+    background: none;
+}
 
 /* ── 启动浮窗 ──
    ★ 它是主窗口的**子控件**，不是独立窗口：`Qt.Popup` 在 Windows 上会抢焦点，
@@ -360,10 +397,14 @@ class NotificationDrawer(QFrame):
         # ★ 「全部已读」按钮去掉了：抽屉一打开就全部标为已读，
         #   这个按钮在同一个界面上永远没有可点的状态（点之前角标已经清零）。
         #   换成一个齿轮：推送的设置就在这里改（城市、开关、立即运行）。
+        #   ★ 图标与左边栏底部的设置按钮**同一份资源**（`ui/icons/gear.svg`），
+        #     两处的"设置"应该是同一个东西，画两个齿轮只会让人以为功能不同。
 
         gear = QToolButton()
         gear.setObjectName("notifyGear")
-        gear.setText("⚙")
+        gear.setIcon(QIcon(str(resource_path("ui/icons/gear.svg"))))
+        gear.setIconSize(QSize(16, 16))
+        gear.setFixedSize(24, 24)
         gear.setToolTip("推送设置")
         gear.setCursor(Qt.CursorShape.PointingHandCursor)
         gear.clicked.connect(self.settings_requested)
@@ -387,6 +428,23 @@ class NotificationDrawer(QFrame):
         self._scroll.setFrameShape(QFrame.Shape.NoFrame)
         self._scroll.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+        # ── 滚动条：细、无箭头、平时隐去，滚动时浮出来 ──
+        #
+        # ★ 策略固定 `AlwaysOn`，只让滑块的透明度变化：
+        #   如果改用「出现时开、消失时关」，视口宽度会跟着变，正文要重新折行，
+        #   整屏跳一下 —— 比看见一条细滑条难受得多。
+        self._bar = self._scroll.verticalScrollBar()
+        self._bar.setObjectName("notifyScrollBar")
+        self._bar.setProperty("hovered", False)
+        self._scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        self._hide_bar = QTimer(self)
+        self._hide_bar.setSingleShot(True)
+        self._hide_bar.setInterval(900)         # 停手之后近一秒才淡出
+        self._hide_bar.timeout.connect(lambda: self._set_bar_visible(False))
+        self._bar.valueChanged.connect(lambda _v=0: self._set_bar_visible(True))
+        self._scroll.viewport().installEventFilter(self)
 
         self._container = QWidget()
         self._container.setObjectName("notifyScrollBody")
@@ -456,6 +514,33 @@ class NotificationDrawer(QFrame):
 
     def item_count(self) -> int:
         return self._count
+
+    # ---- 滚动条的显隐 ----
+
+    def eventFilter(self, obj, event) -> bool:                 # noqa: N802
+        """滚轮也算「正在滚动」。
+
+        ★ 只靠 `valueChanged` 会漏一种情况：已经滚到顶了还继续往上滚，
+          value 不变、信号不发，滑条就一直藏着 —— 用户会以为它坏了。
+        """
+        if event.type() == QEvent.Type.Wheel:
+            self._set_bar_visible(True)
+        return super().eventFilter(obj, event)
+
+    def _set_bar_visible(self, on: bool) -> None:
+        """显隐只改一个动态属性，由 QSS 决定滑块颜色。"""
+        bar = self._bar
+        if bool(bar.property("hovered")) != on:
+            bar.setProperty("hovered", on)
+            # ★ 动态属性变了必须重新 polish，否则 QSS 不会重算 ——
+            #   这是 Qt 样式表最容易踩的一个坑：属性改了、界面没反应。
+            bar.style().unpolish(bar)
+            bar.style().polish(bar)
+            bar.update()
+        if on:
+            self._hide_bar.start()
+        else:
+            self._hide_bar.stop()
 
 
 class NotificationToast(QFrame):
