@@ -14,6 +14,7 @@
 """
 from __future__ import annotations
 
+import ast
 import os
 import sys
 import time
@@ -234,6 +235,38 @@ nodes:
             E.executor_for("human.confirm") is E._exec_human_confirm)
 
     # ------------------------------------------------------------------
+    c.section("第 7 节：★★ 执行器调用的知识库方法**必须真的存在**")
+    # ------------------------------------------------------------------
+    # ⚠️ 这一节是被打包版打出来的：`_exec_kb_query` 原先写 `kb.search(...)`，
+    #    而 `KnowledgeBase` 从来没有 `search` 方法，真实接口是 `retrieve_context`。
+    #    四个守卫里的 `_StubKB` 恰好都写了 `search`，替身把真 bug 挡得严严实实 ——
+    #    十几次全绿，装到机器上第一次跑简报就 AttributeError。
+    #    所以这里不再相信替身，直接对着**真实类**做静态断言。
+    from core.knowledge_base import KnowledgeBase as _KB
+
+    src_engine = (ROOT / "core" / "orchestration" / "engine.py").read_text(
+        encoding="utf-8")
+    fn = next((n for n in ast.walk(ast.parse(src_engine))
+               if isinstance(n, ast.FunctionDef) and n.name == "_exec_kb_query"), None)
+    c.check("找得到 `_exec_kb_query` 的函数体", fn is not None)
+
+    used_attrs: set[str] = set()
+    if fn is not None:
+        for node in ast.walk(fn):
+            if (isinstance(node, ast.Attribute)
+                    and isinstance(node.value, ast.Name)
+                    and node.value.id == "kb"):
+                used_attrs.add(node.attr)
+    c.check("★ 执行器确实用了知识库实例的属性/方法", bool(used_attrs), str(used_attrs))
+    missing = sorted(a for a in used_attrs if not hasattr(_KB, a))
+    c.check("★★ `kb.<方法>` 每一个都真的存在于 KnowledgeBase 上",
+            not missing, f"真类没有：{missing}")
+    c.check("★ 用的是真实接口 `retrieve_context`（不是想象出来的 search）",
+            "retrieve_context" in used_attrs, str(used_attrs))
+    c.check("★ 替身也用真名字（否则它又会把 bug 挡住）",
+            "retrieve_context" in dir(_StubKB) and not hasattr(_StubKB, "search"))
+
+    # ------------------------------------------------------------------
     print()
     print("=" * 78)
     print(f"执行器守卫: {c.passed}/{c.total} 通过"
@@ -243,10 +276,16 @@ nodes:
 
 
 class _StubKB:
-    """`data.kb_query` 需要注入的知识库替身。"""
+    """`data.kb_query` 需要注入的知识库替身。
 
-    def search(self, q, top_k=3):                            # noqa: ANN001
-        return [{"text": f"stub:{q}", "score": 0.9}]
+    ★ 方法名与返回类型必须和 `KnowledgeBase.retrieve_context()` **一致**。
+      第一版这里写的是 `search()`，而真实类从来没有这个方法 —— 替身把真 bug
+      挡住了，守卫全绿，打包版第一次跑简报就 AttributeError。
+      契约由本文件第 ④ 节的静态断言守着。
+    """
+
+    def retrieve_context(self, query, k=3, **kwargs):        # noqa: ANN001
+        return f"stub:{query}"
 
 
 def _ok_transition(src: StepState, dst: StepState) -> bool:

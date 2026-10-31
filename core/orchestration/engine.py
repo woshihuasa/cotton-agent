@@ -210,14 +210,32 @@ def _save_images(images: list[Any], *, run_id: str, node_id: str) -> list[str]:
 
 
 def _exec_kb_query(node: Node, ctx: NodeContext) -> NodeOutcome:
-    """`data.kb_query` —— 只读检索。**引擎持有一个知识库实例以避免重复加载**。"""
+    """`data.kb_query` —— 只读检索。**引擎持有一个知识库实例以避免重复加载**。
+
+    ★ 2026-10-31 修：这里原先调的是 `kb.search(q, top_k=...)` —— 而
+      `KnowledgeBase` **从来没有 `search` 方法**，真实接口是
+      `retrieve_context(query, k=...)`，返回**拼好的字符串**而不是文档列表。
+      更糟的是四个守卫里的 `_StubKB` 都写了 `search`，替身把真 bug 挡住了：
+      守卫全绿，打包版第一次跑简报就 AttributeError。
+      现在 `check_workflow_engine.py` 里有一条「执行器引用的方法必须真的在
+      KnowledgeBase 上」的断言，替身也必须用真名字。
+
+    ★ 检索为空按**失败**处理，不当成"没有相关资料"往下走：这条查询是固定口径的
+      农事要点，空结果意味着库没建好或索引是空的，让工作流在这里停住，
+      比让它拿空上下文硬写一段更诚实。
+    """
     kb = ctx.inputs.get("__kb__")
     if kb is None:
         raise EngineError("data.kb_query 需要注入知识库实例（inputs['__kb__']）")
     q = ctx.resolve(node.params.get("query", ""))
     top_k = int(ctx.resolve(node.params.get("top_k", 3)) or 3)
-    docs = kb.search(q, top_k=top_k)
-    return NodeOutcome(ok=True, output={"docs": docs, "query": q})
+    context = kb.retrieve_context(q, k=top_k)
+    text = str(context or "").strip()
+    if not text:
+        return NodeOutcome(
+            ok=False,
+            error=f"知识库检索为空（query={q!r}）—— 库未建好或索引为空")
+    return NodeOutcome(ok=True, output={"text": text, "query": q})
 
 
 #: 档位从"最保守"到"最放行"的顺序，用于判断"是否达到要求档位"。

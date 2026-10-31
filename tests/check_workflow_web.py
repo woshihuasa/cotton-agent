@@ -225,8 +225,10 @@ def main() -> int:
 
 
 class _StubKB:
-    def search(self, q, top_k=3):                                 # noqa: ANN001
-        return [{"text": f"stub:{q}"}]
+    """方法名与 `KnowledgeBase.retrieve_context()` 保持一致（替身不许用真类没有的名字）。"""
+
+    def retrieve_context(self, query, k=3, **kwargs):             # noqa: ANN001
+        return f"stub:{query}"
 
 
 if __name__ == "__main__":
