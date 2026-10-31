@@ -96,7 +96,8 @@ def section_dedup(c: Checker) -> None:
     s = _store("dedup")
     s.add(job_id="daily_brief", title="简报", body="第一版", when=T0)
     s.add(job_id="daily_brief", title="简报", body="第二版", when=T0 + timedelta(hours=1))
-    c.check("★ 同一天同任务重推 → 仍然只有一条", len(s.items()) == 1, str(len(s.items())))
+    c.check("不传 key 时退回按天：同一天同任务仍然只有一条",
+            len(s.items()) == 1, str(len(s.items())))
     c.check("★ 正文被替换成最新的", s.items()[0].body == "第二版", s.items()[0].body)
     c.check("正文变了 → 重新算未读", s.unread_count() == 1)
 
@@ -123,6 +124,52 @@ def section_dedup(c: Checker) -> None:
     c.check("非法 job_id 也被兜住（会变成安全字符）",
             s.add(job_id="../etc", title="t", body="b", when=T0).id.startswith("---etc-")
             or True)
+
+
+def section_by_run(c: Checker) -> None:
+    c.section("第 2 节（续）：★ 按**运行**去重 —— 新的不该覆盖旧的")
+
+    # ★ 这一节是被用户实测打出来的：农情简报改成每小时之后，新的推送会把旧的
+    #   覆盖掉，一天下来只剩最后一条。根因是 id 用了「任务-日期」。
+    s = _store("by_run")
+    s.add(job_id="daily_brief", title="简报", body="09:00 那一版",
+          when=T0, key="daily_brief-20261031-090000-aaa111")
+    s.add(job_id="daily_brief", title="简报", body="10:00 那一版",
+          when=T0 + timedelta(hours=1), key="daily_brief-20261031-100000-bbb222")
+    c.check("★ 两次不同的运行 → **两条**消息（不再互相覆盖）",
+            len(s.items()) == 2, str([n.id for n in s.items()]))
+    bodies = sorted(n.body for n in s.items())
+    c.check("★ 两条的正文都在（旧的那条没被吃掉）",
+            bodies == ["09:00 那一版", "10:00 那一版"], str(bodies))
+    c.check("id 就是运行标识",
+            all(n.id.startswith("daily_brief-20261031-") for n in s.items()),
+            str([n.id for n in s.items()]))
+
+    # 同一次运行重复投递 → 合并
+    before = len(s.items())
+    s.add(job_id="daily_brief", title="简报", body="10:00 那一版",
+          when=T0 + timedelta(hours=1, minutes=1),
+          key="daily_brief-20261031-100000-bbb222")
+    c.check("★ 同一次运行的重复投递合并成一条", len(s.items()) == before,
+            str(len(s.items())))
+
+    # 已读不被同一次运行的重投冲掉
+    s.mark_all_read(T0 + timedelta(hours=2))
+    s.add(job_id="daily_brief", title="简报", body="10:00 那一版",
+          when=T0 + timedelta(hours=2, minutes=1),
+          key="daily_brief-20261031-100000-bbb222")
+    c.check("同一次运行重投不清已读", s.unread_count() == 0, str(s.unread_count()))
+
+    # 新的运行仍然是未读
+    s.add(job_id="daily_brief", title="简报", body="11:00 那一版",
+          when=T0 + timedelta(hours=3), key="daily_brief-20261031-110000-ccc333")
+    c.check("★ 新运行算未读", s.unread_count() == 1, str(s.unread_count()))
+    c.check("一共三条", len(s.items()) == 3, str(len(s.items())))
+
+    # key 里有奇怪字符也不会炸，且仍然唯一
+    n = s.add(job_id="x", title="t", body="b", when=T0, key="../恶意 run id")
+    c.check("★ 运行标识里的危险字符被清掉",
+            ".." not in n.id and "/" not in n.id, n.id)
 
 
 def _raises(fn) -> bool:
@@ -284,6 +331,7 @@ def main() -> int:
     try:
         section_basic(c)
         section_dedup(c)
+        section_by_run(c)
         section_prune(c)
         section_robust(c)
         section_io(c)

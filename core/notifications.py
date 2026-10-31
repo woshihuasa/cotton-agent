@@ -21,14 +21,18 @@
     所以正文进 index，`path` 只作为「打开存档」的入口 —— 两者分工是
     **收件箱自包含、存档是长期档案**，不是同一份数据的两个副本。
 
-【同一天同一任务只留一条】
+【按运行去重，不是按天】
 
-    `id = f"{job_id}-{YYYY-MM-DD}"`。同一天同一个任务再推一次是**替换**而不是
-    新增，于是重启补发、失败重试都不会堆出两条一模一样的简报。
+    `id` 优先用**运行标识**（`run_id`，形如 `daily_brief-20261031-131209-a1b2c3`）：
+    同一次运行的重复投递是替换（重启补发、失败重试不该推两遍），**不同的运行各留一条**。
+
+    ★ 2026-10-31 修：原先是 `id = 任务id-YYYY-MM-DD`，同一天同一个任务被当成
+      同一条。农情简报改成每小时之后，**新的会覆盖旧的** —— 一天下来只剩最后一条，
+      用户看到的推送历史全被吃掉。
     替换时正文没变就保留已读状态，正文变了才重新算未读 —— 重试不该把用户
     已经看过的推送又标成新的。
 
-【保留策略】最近 200 条、或 90 天内，写盘时顺手裁掉。
+【保留策略】最近 600 条、或 15 天内，写盘时顺手裁掉（天数是主口径，条数是保险）。
 """
 from __future__ import annotations
 
@@ -44,14 +48,18 @@ from typing import Any, Callable
 
 log = logging.getLogger("Notifications")
 
-#: 最多保留多少条
-DEFAULT_KEEP = 200
+#: 最多保留多少条。
+#: ★ 只是保险，主口径是天数。按运行去重之后，每小时一次的简报一天就有 24 条，
+#:   15 天接近 400 条 —— 条数上限必须高于这个量级，否则天数口径会被它抢先裁掉。
+DEFAULT_KEEP = 600
 
 #: 最多保留多少天。★ 界面底部那行字就是读这个值，改这里文案会跟着变。
 DEFAULT_KEEP_DAYS = 15
 
 #: id 只允许这些字符 —— 它会出现在文件名与日志里。
-_ID_RE = re.compile(r"^[A-Za-z0-9_-]+-\d{4}-\d{2}-\d{2}$")
+#: ★ 不再要求以日期结尾：id 现在优先用 **run_id**（`任务-YYYYMMDD-HHMMSS-随机`），
+#:   见 `make_id()` 的说明。
+_ID_RE = re.compile(r"^[A-Za-z0-9._:-]+$")
 
 
 def notifications_dir() -> Path:
@@ -125,8 +133,23 @@ class Notification:
         )
 
 
-def make_id(job_id: str, when: datetime) -> str:
-    """`任务id-YYYY-MM-DD`。同一天同一任务只会有一条。"""
+def make_id(job_id: str, when: datetime, key: str = "") -> str:
+    """通知 id。**优先用运行标识，退化成「任务-日期」。**
+
+    ★ 2026-10-31 修：原先是 `任务id-YYYY-MM-DD`，于是"同一天同一个任务"被当成
+      同一条 —— 农情简报改成每小时之后，**新的会覆盖旧的**，一天下来只剩最后一条。
+      去重该按**运行**而不是按天：同一次运行的重复投递要合并（重启、重试不该推两遍），
+      不同的运行各算一条。
+
+    传了 `key`（调用方给 `run_id`）就用它；没传才退回按天，兼容老的调用方式。
+    """
+    raw = str(key or "").strip()
+    if raw:
+        # 去掉首尾的 `.` / `-` / `:`：`..` 开头看着像相对路径，虽然 id 不参与
+        # 拼路径（索引文件名是固定的），但日志与产物里出现 `../` 总归不合适。
+        safe_key = re.sub(r"[^A-Za-z0-9._:-]", "-", raw).strip(".-:")
+        if safe_key:
+            return safe_key
     safe = re.sub(r"[^A-Za-z0-9_-]", "-", str(job_id or "").strip()) or "job"
     return f"{safe}-{when:%Y-%m-%d}"
 
@@ -206,13 +229,18 @@ class NotificationStore:
     # ---- 写 ----
 
     def add(self, *, job_id: str, title: str, body: str,
-            path: str = "", when: datetime | None = None) -> Notification:
-        """收一条推送。同一天同一任务是**替换**，不会堆两条。"""
+            path: str = "", when: datetime | None = None,
+            key: str = "") -> Notification:
+        """收一条推送。
+
+        `key` 传**运行标识**（`run_id`）时，按运行去重：同一次运行重复投递会替换，
+        不同的运行各留一条。不传则退回「同一天同一任务只有一条」的老口径。
+        """
         when = (when or self.now()).replace(microsecond=0)
         text = str(body or "").strip()
         if not text:
             raise ValueError("通知正文为空 —— 不往收件箱里塞空条目")
-        nid = make_id(job_id, when)
+        nid = make_id(job_id, when, key)
         if not _ID_RE.match(nid):
             raise ValueError(f"通知 id 不合法：{nid!r}")
         self._ensure()

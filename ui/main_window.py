@@ -1465,6 +1465,9 @@ class CottonAgentWindow(QMainWindow):
                 title=str(payload.get("title") or ""),
                 body=text,
                 path=str(payload.get("path") or ""),
+                # ★ 按运行去重：同一次运行的重复投递合并，不同运行各一条。
+                #   不传这个的话，「每天每任务一条」会让每小时的新推送覆盖旧的。
+                key=str(payload.get("run_id") or ""),
             )
         except ValueError as e:
             log.warning("推送没能落进收件箱：%s", e)
