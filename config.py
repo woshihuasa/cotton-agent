@@ -227,6 +227,18 @@ class AppConfig:
     # ── Tavily 搜索 API 配置 ──
     TAVILY_API_KEY: str = os.getenv("TAVILY_API_KEY", "")
 
+    # ── 联网搜索的后端选择 ──
+    #
+    # `auto`（默认）→ 有 Tavily Key 就用 Tavily，否则用 DeepSeek Search，
+    #                  两个都没有就由工具层报错。**保持原有行为不变**。
+    # `tavily` / `deepseek` → 强制指定（指定的那个没配 Key 就报错，不静默换家）。
+    #
+    # ★ DeepSeek Search 见 https://api-docs.deepseek.com/zh-cn/guides/search/
+    #   计费按「成功请求次数」：1,000 次 5 元；失败/无结果不计费。
+    WEB_SEARCH_BACKEND: str = os.getenv("WEB_SEARCH_BACKEND", "auto").strip().lower()
+    DEEPSEEK_SEARCH_URL: str = os.getenv(
+        "DEEPSEEK_SEARCH_URL", "https://api.deepseek.com/v1/tools/search").strip()
+
     # ── Embedding API 配置 (硅基流动) ──
     EMBEDDING_API_KEY: str = os.getenv("EMBEDDING_API_KEY", "")
     EMBEDDING_BASE_URL: str = os.getenv("EMBEDDING_BASE_URL", "https://api.siliconflow.cn/v1")
