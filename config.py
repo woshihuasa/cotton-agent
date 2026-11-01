@@ -244,6 +244,11 @@ class AppConfig:
         "WEB_SEARCH_DEEPSEEK_ON", "1").strip().lower() not in ("0", "false", "no", "off")
     # ★ DeepSeek 搜索可以单独配一把 Key（留空 = 沿用 DEEPSEEK_API_KEY）
     DEEPSEEK_SEARCH_API_KEY: str = os.getenv("DEEPSEEK_SEARCH_API_KEY", "")
+
+    # ── 天气数据源 ──
+    # `auto`（默认）→ 中央气象台为主，认不出地名再退高德；
+    # `nmc` / `amap` → 只用指定源（失败就如实报错，**不静默换源**）。
+    WEATHER_SOURCE: str = os.getenv("WEATHER_SOURCE", "auto").strip().lower()
     DEEPSEEK_SEARCH_URL: str = os.getenv(
         "DEEPSEEK_SEARCH_URL", "https://api.deepseek.com/v1/tools/search").strip()
 
@@ -309,6 +314,8 @@ _RUNTIME_KEYS = (
     # ★ 联网搜索后端（auto/tavily/deepseek）：在「设置 → 其他 API」里改完即生效
     "WEB_SEARCH_BACKEND", "DEEPSEEK_SEARCH_URL",
     "WEB_SEARCH_TAVILY_ON", "WEB_SEARCH_DEEPSEEK_ON", "DEEPSEEK_SEARCH_API_KEY",
+    # ★ 天气数据源（auto/nmc/amap）：改完即生效，不必重启
+    "WEATHER_SOURCE",
     "EMBEDDING_API_KEY", "EMBEDDING_BASE_URL", "EMBEDDING_MODEL",
     # ★ 切换默认 Embedding 服务商（热更新）：在「设置 → Embedding」里改完立刻生效
     "EMBEDDING_PROVIDER",
