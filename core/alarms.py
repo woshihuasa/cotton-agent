@@ -90,6 +90,38 @@ class Alert:
         return f"{self.title}（{self.issuetime}）"
 
 
+#: 信号种类 → **知识库检索主题词**。
+#:
+#: ★ 为什么需要这张表：知识库里是**散文**（"大风天不要化控""蕾期遇高温易脱落"），
+#:   没有数字。拿"风力 6 级"去检索散文是检索不到的（向量模型也会跑偏），
+#:   必须换成**农事动作词**去查，而数字只用来说清"有多大、什么时候"。
+#:
+#: 键按包含关系匹配：信号名里出现左侧任一词就取对应主题词。
+SIGNAL_TOPICS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("大风", "沙尘暴", "沙尘", "扬沙"), "防风 压膜 化控 喷药 沙尘防护"),
+    (("高温", "干旱", "干热风"), "高温 滴灌 降温 蕾铃脱落 花粉"),
+    (("低温", "霜冻", "寒潮", "道路结冰"), "低温 防霜冻 出苗 抗寒 保全苗"),
+    (("暴雨", "暴雪", "冰雹", "雷电", "强对流"), "暴雨 排水 防倒伏 灾后管理"),
+    (("大雾", "霾"), "湿度 病害 通风 打药时机"),
+)
+
+#: 认不出信号时用的兜底主题词（通用田间管理）
+DEFAULT_TOPIC = "田间管理 水肥调控 病虫害防治"
+
+
+def topic_keywords(signal: str) -> str:
+    """信号种类 → 检索主题词。认不出就返回通用词（不返回空）。
+
+    ★ 返回空串会让检索 query 退化成"地区 + 棉花"，命中一堆泛泛的段落；
+      给一个通用主题至少保证拿到的资料与田间管理相关。
+    """
+    text = str(signal or "")
+    for keys, topic in SIGNAL_TOPICS:
+        if any(k in text for k in keys):
+            return topic
+    return DEFAULT_TOPIC
+
+
 def parse_title(title: str) -> dict:
     """标题 → `{unit, signal, level}`。**认不出就返回空字典**（不猜）。
 
@@ -214,5 +246,6 @@ def format_for_model(alerts: list[Alert], *, limit: int = 8) -> str:
     return "\n".join(lines)
 
 
-__all__ = ["Alert", "LEVEL_RANK", "LIST_API", "area_code_of", "clear_cache",
-           "fetch_alerts", "format_for_model", "match", "parse_title"]
+__all__ = ["Alert", "DEFAULT_TOPIC", "LEVEL_RANK", "LIST_API", "SIGNAL_TOPICS",
+           "area_code_of", "clear_cache", "fetch_alerts", "format_for_model",
+           "match", "parse_title", "topic_keywords"]

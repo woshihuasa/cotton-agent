@@ -187,6 +187,31 @@ nodes:
             run6.steps["after"].state == StepState.PENDING,
             run6.steps["after"].state.value)
 
+    # ★ optional: true —— 预警类检索允许空（库里没有这条主题很常见）
+    wf_optkb = loader.load_text("""
+id: optkb
+nodes:
+  - { id: t, type: data.kb_query, params: { query: q, optional: true }, side_effect: none }
+""")
+    run_opt = E.Engine(wf_optkb, persist=False).run(
+        inputs={"__kb__": _StubKBEmpty()})
+    c.check("★ 检索为空 + optional=true → 节点**成功**（不拖垮整条预警）",
+            run_opt.state == StepState.DONE, run_opt.state.value)
+    c.check("产出里 text 为空串、并标了 empty",
+            (run_opt.steps["t"].output or {}).get("text") == ""
+            and (run_opt.steps["t"].output or {}).get("empty") is True,
+            str(run_opt.steps["t"].output))
+
+    wf_reqkb = loader.load_text("""
+id: reqkb
+nodes:
+  - { id: t, type: data.kb_query, params: { query: q }, side_effect: none }
+""")
+    run_req = E.Engine(wf_reqkb, persist=False).run(
+        inputs={"__kb__": _StubKBEmpty()})
+    c.check("★ 反向：不带 optional 时空结果仍判失败（默认口径没变）",
+            run_req.state == StepState.FAILED, run_req.state.value)
+
     # ------------------------------------------------------------------
     c.section("第 4 节：★ 超时按失败处理（不假装成功）")
     # ------------------------------------------------------------------
@@ -273,6 +298,13 @@ nodes:
           f"{'' if c.passed == c.total else '  ← 存在失败项'}")
     print("=" * 78)
     return 0 if c.passed == c.total else 1
+
+
+class _StubKBEmpty:
+    """只读库：**永远检索不到东西**（用来验 optional 语义）。"""
+
+    def retrieve_context(self, query: str, k: int = 3) -> str:
+        return ""
 
 
 class _StubKB:

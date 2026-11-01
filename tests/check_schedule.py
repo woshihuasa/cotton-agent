@@ -769,41 +769,89 @@ def section_deliver(c: Checker) -> None:
 
 
 def section_alarm(c: Checker) -> None:
-    c.section("第 8 节：预警的静默期（同一条不会一天内反复推）")
+    c.section("第 8 节：预警读官方信号（去重、升级、取不到就别报）")
+
+    from core import alarms as A
 
     watch = S.default_jobs()[1]
-    sched, runner, events = _fresh(
-        watch, outputs={"advice": {"title": "T", "body": "明天大风，今天别打药。"}},
-        fetcher=lambda city, when: WEATHER_TOMORROW)
+    real_fetch = A.fetch_alerts
 
-    t0 = datetime(2026, 10, 30, 9, 0)
-    fired = sched.tick(t0)
-    c.check("首轮命中规则 → 报警一次", fired == ["weather_watch"], str(fired))
-    c.check("报警时把命中项传给了工作流",
-            "大风" in str(runner.submitted[0][2].get("alarm")),
-            str(runner.submitted[0][2].get("alarm")))
+    def _alert(alertid: str, signal: str, level: str, when: str = "2026/10/30 08:00"):
+        title = f"新疆维吾尔自治区阿克苏地区气象台发布{signal}{level}预警信号"
+        return A.Alert(alertid=alertid, title=title, issuetime=when,
+                       area_code=A.area_code_of(alertid), **A.parse_title(title))
 
-    t1 = t0 + timedelta(hours=3)
-    c.check("★ 静默期内同一组信号**不**重复报警", sched.tick(t1) == [], "重复了")
-    c.check("状态记成 suppressed",
-            sched.state_of("weather_watch").last_status == "suppressed",
-            sched.state_of("weather_watch").last_status)
+    def _feed(items):
+        """把 alarms.fetch_alerts 换成固定返回值。"""
+        A.fetch_alerts = lambda **k: (list(items), "")
+        return items
 
-    t2 = t0 + timedelta(minutes=watch.repeat_min + 1)
-    c.check("★ 过了静默期仍命中 → 再报一次（提醒是有意义的）",
-            sched.tick(t2) == ["weather_watch"])
+    A.clear_cache()
+    try:
+        # ① 命中一条大风蓝色 → 报警，并把原文与主题词交给工作流
+        _feed([_alert("65290141600000_1", "大风", "蓝色")])
+        sched, runner, events = _fresh(
+            watch, outputs={"advice": {"title": "T", "body": "明天大风，今天别打药。"}})
+        t0 = datetime(2026, 10, 30, 9, 0)
+        c.check("★ 有生效信号 → 报警一次", sched.tick(t0) == ["weather_watch"],
+                str(sched.tick(t0)))
+        payload = runner.submitted[0][2] if runner.submitted else {}
+        c.check("★ 传给工作流的是**官方信号原文**（含等级）",
+                "大风蓝色预警" in str(payload.get("alarm")), str(payload.get("alarm")))
+        c.check("★ 同时给了检索主题词（不带数字）",
+                "防风" in str(payload.get("alarm_topic"))
+                and "6" not in str(payload.get("alarm_topic")),
+                str(payload.get("alarm_topic")))
 
-    # 天气坏掉
-    sched2, runner2, events2 = _fresh(watch, fetcher=lambda city, when: "天气查询失败: 网络错误")
-    c.check("★ 接口坏掉 → 不报警（Fail-Closed）",
-            sched2.tick(t0) == [] and runner2.submitted == [])
-    c.check("★ 接口坏掉会留一条 degraded 事件（不静默）",
-            any(e.get("type") == "degraded" for e in events2), str(events2))
+        # ② 同一条信号（同一 alertid）不再重复
+        t1 = t0 + timedelta(minutes=watch.repeat_min + 1)
+        c.check("★ 同一条信号（同 alertid）不会重复推送",
+                sched.tick(t1) == [], "重复了")
+        c.check("状态记成 suppressed",
+                sched.state_of("weather_watch").last_status == "suppressed",
+                sched.state_of("weather_watch").last_status)
 
-    # 没有命中
-    sched3, runner3, _ = _fresh(watch, fetcher=lambda city, when: WEATHER_TODAY)
-    c.check("天气正常且无极端值 → 不报警，也不留噪声",
-            sched3.tick(t0) == [] and runner3.submitted == [])
+        # ③ 升级（新 alertid + 更高等级）要重报
+        _feed([_alert("65290141600000_2", "大风", "橙色")])
+        t3 = t1 + timedelta(minutes=watch.repeat_min + 1)
+        c.check("★ 等级升级 → 再报一次", sched.tick(t3) == ["weather_watch"],
+                str(runner.submitted))
+        c.check("升级那次带的是橙色",
+                "橙色" in str(runner.submitted[-1][2].get("alarm")),
+                str(runner.submitted[-1][2].get("alarm")))
+
+        # ④ 没有生效信号 → 不报
+        _feed([])
+        sched2, runner2, _ = _fresh(watch)
+        c.check("★ 没有生效预警 → 不报警，也不留噪声",
+                sched2.tick(t0) == [] and runner2.submitted == [])
+        c.check("状态说明是「没有生效的预警」",
+                "没有生效" in sched2.state_of("weather_watch").last_note,
+                sched2.state_of("weather_watch").last_note)
+
+        # ⑤ 预警源挂了 → 不报，但要留 degraded（不能把"不知道"说成"没事"）
+        A.fetch_alerts = lambda **k: ([], "预警源不可达：测试")
+        sched3, runner3, events3 = _fresh(watch)
+        c.check("★ 预警源不可达 → 不报警", sched3.tick(t0) == []
+                and runner3.submitted == [])
+        c.check("★ 且留一条 degraded 事件（不静默）",
+                any(e.get("type") == "degraded" for e in events3), str(events3))
+        c.check("状态记成 failed 并带上原因",
+                sched3.state_of("weather_watch").last_status == "failed"
+                and "不可达" in sched3.state_of("weather_watch").last_note,
+                sched3.state_of("weather_watch").last_status)
+
+        # ⑥ 多地信号并存时，一轮只推等级最高的那条
+        _feed([_alert("65290141600000_3", "大风", "蓝色"),
+               _alert("65290141600000_4", "高温", "红色")])
+        sched4, runner4, _ = _fresh(watch)
+        c.check("★ 多条信号时挑等级最高的先报", sched4.tick(t0) == ["weather_watch"])
+        c.check("报的是红色高温",
+                "高温红色" in str(runner4.submitted[0][2].get("alarm")),
+                str(runner4.submitted[0][2].get("alarm")))
+    finally:
+        A.fetch_alerts = real_fetch
+        A.clear_cache()
 
 
 def section_contracts(c: Checker) -> None:
@@ -840,7 +888,8 @@ def section_contracts(c: Checker) -> None:
         required = {k for k, v in wf.inputs.items() if v.required}
         supplied = set(job.inputs)
         if job.kind == "weather_watch":
-            supplied |= {"alarm", "today"}
+            # ★ 触发层在运行时注入的三样
+            supplied |= {"alarm", "alarm_topic", "today"}
         else:
             supplied |= {"today"}
         c.check(f"★ {job.id} 提供了 {wf_name} 的全部必填输入",

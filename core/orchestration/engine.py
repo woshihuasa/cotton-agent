@@ -218,6 +218,15 @@ def _save_images(images: list[Any], *, run_id: str, node_id: str) -> list[str]:
     return paths
 
 
+def _as_bool(value: Any) -> bool:
+    """把参数里的真假写成"不会踩坑"的版本（字符串 "0"/"false" 也算假）。"""
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().lower() not in ("", "0", "false", "no", "off", "none")
+
+
 def _exec_kb_query(node: Node, ctx: NodeContext) -> NodeOutcome:
     """`data.kb_query` —— 只读检索。**引擎持有一个知识库实例以避免重复加载**。
 
@@ -238,9 +247,17 @@ def _exec_kb_query(node: Node, ctx: NodeContext) -> NodeOutcome:
         raise EngineError("data.kb_query 需要注入知识库实例（inputs['__kb__']）")
     q = ctx.resolve(node.params.get("query", ""))
     top_k = int(ctx.resolve(node.params.get("top_k", 3)) or 3)
+    # ★ `optional`：空结果要不要判失败。
+    #   农情简报那种**固定口径**的查询，空结果说明库没建好，该停住；
+    #   而极端天气预警是"按信号临时找措施"，库里没有对应主题很正常 ——
+    #   这时候拿天气读数硬写一条，也比整条预警发不出去强。
+    optional = _as_bool(ctx.resolve(node.params.get("optional", False)))
     context = kb.retrieve_context(q, k=top_k)
     text = str(context or "").strip()
     if not text:
+        if optional:
+            return NodeOutcome(ok=True, output={"text": "", "query": q,
+                                                "empty": True})
         return NodeOutcome(
             ok=False,
             error=f"知识库检索为空（query={q!r}）—— 库未建好或索引为空")

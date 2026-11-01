@@ -86,6 +86,23 @@ def _mk(alertid: str, title: str, when: str = "2026/11/01 17:27") -> alarms.Aler
                         **alarms.parse_title(title))
 
 
+def section_topic(c: Checker) -> None:
+    c.section("第 2 节（续）：★ 信号 → 检索主题词")
+
+    c.check("★ 大风 → 防风/化控/喷药 这类**动作词**",
+            "化控" in alarms.topic_keywords("大风"), alarms.topic_keywords("大风"))
+    c.check("沙尘暴也归到防风那一组",
+            alarms.topic_keywords("沙尘暴") == alarms.topic_keywords("大风"))
+    c.check("★ 高温 → 滴灌/降温/花粉",
+            "滴灌" in alarms.topic_keywords("高温"), alarms.topic_keywords("高温"))
+    c.check("★ 霜冻 → 防霜冻/出苗",
+            "防霜冻" in alarms.topic_keywords("霜冻"), alarms.topic_keywords("霜冻"))
+    c.check("★ 主题词里**不含数字**（知识库是散文，用数字检索会跑偏）",
+            not any(ch.isdigit() for ch in alarms.topic_keywords("大风")))
+    c.check("认不出的信号 → 通用主题词（不返回空）",
+            alarms.topic_keywords("某个没见过的信号") == alarms.DEFAULT_TOPIC)
+
+
 def section_match(c: Checker) -> None:
     c.section("第 2 节：按地区筛")
 
@@ -268,6 +285,7 @@ def main() -> int:
     c = Checker()
     try:
         section_parse(c)
+        section_topic(c)
         section_match(c)
         section_format(c)
         section_fetch(c)

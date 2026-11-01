@@ -42,6 +42,8 @@ from datetime import datetime, time as dtime, timedelta
 from pathlib import Path
 from typing import Any, Callable
 
+from core import alarms
+
 log = logging.getLogger("Schedule")
 
 #: 轮询间隔（秒）。判定本身是纯计算，30 秒足够准到「分钟内」。
@@ -330,6 +332,17 @@ _FIELD_LABEL: dict[str, str] = {
     "day_weather": "明天白天天气", "night_weather": "明天夜间天气",
     "humidity": "湿度",
 }
+
+
+def _split_ids(text: str) -> set[str]:
+    """状态里存的 `reported_ids`（逗号分隔）→ 集合。"""
+    return {x.strip() for x in str(text or "").split(",") if x.strip()}
+
+
+def _append_ids(state: "JobState", ids: list[str], *, keep: int = 40) -> None:
+    """把已推送的 alertid 记进状态，**只留最近 N 条**（状态文件不该无限长大）。"""
+    merged = list(dict.fromkeys(list(_split_ids(state.reported_ids)) + list(ids)))
+    state.reported_ids = ",".join(merged[-keep:])
 
 
 def format_alarm(hits: list[dict]) -> str:
@@ -635,6 +648,9 @@ class JobState:
     last_note: str = ""
     last_alert_key: str = ""
     last_alert_at: str = ""
+    #: 已推送过的 alertid（逗号分隔）。官方 alertid 带发布时间戳，
+    #: 同一条信号重新发布就是新 id —— 所以"推过没有"只能按 id 记。
+    reported_ids: str = ""
 
     def to_dict(self) -> dict[str, str]:
         return {
@@ -642,6 +658,7 @@ class JobState:
             "last_run_id": self.last_run_id, "last_note": self.last_note,
             "last_alert_key": self.last_alert_key,
             "last_alert_at": self.last_alert_at,
+            "reported_ids": self.reported_ids,
         }
 
     @classmethod
@@ -930,7 +947,13 @@ class Scheduler:
         return job.id
 
     def _tick_watch(self, job: Job, now: datetime) -> str:
-        """轮询类任务：取数 → 判规则 → 命中且不在静默期才报警。"""
+        """轮询类任务：读**官方**预警 → 有新增/升级的信号才推送。
+
+        ★ 2026-11-01 改：原来是自己用四条阈值判灾（低温 ≤5℃ / 风力 ≥6 级…）。
+          现在改成读气象台**已经发布**的预警信号。自算规则的问题不是算得不准，
+          而是**没有出处**：同样 6 级风，气象台发了蓝色预警就是"有灾情风险"，
+          没发就只是"风大"。
+        """
         st = self.state_of(job.id)
         scheduled = due_at(job.trigger, _parse_iso(st.last_fired), now)
         if scheduled is None:
@@ -944,41 +967,56 @@ class Scheduler:
         if job.id in self._inflight:
             return ""
 
-        raw = self._fetch(str(job.inputs.get("city") or ""), "tomorrow")
-        readings = parse_weather(raw)
-        if not readings:
-            st.last_status = "no-alarm"
-            st.last_note = "天气数据不可解析，本轮不判（Fail-Closed）"
+        alerts, error = alarms.fetch_alerts()
+        if error:
+            # ★ 拉不到 ≠ 没有预警。如实记失败，绝不推"今日无预警"。
+            st.last_status = "failed"
+            st.last_note = error
             self._dirty = True
             self._emit({"type": "degraded", "job": job.id,
-                        "text": f"「{job.title or job.id}」拿不到可解析的天气，本轮跳过。"})
+                        "text": f"「{job.title or job.id}」{error}，本轮不判定。"})
             return ""
 
-        hits = evaluate_rules(readings, job.rules)
+        city = str(job.inputs.get("city") or "")
+        hits = alarms.match(alerts, area_hint=city)
         if not hits:
             st.last_status = "no-alarm"
-            st.last_note = "本轮无信号"
+            st.last_note = f"当前没有生效的预警（全国 {len(alerts)} 条）"
             self._dirty = True
             return ""
 
-        key = "|".join(sorted(h["id"] for h in hits))
+        seen = _split_ids(st.reported_ids)
+        fresh = [a for a in hits if a.alertid and a.alertid not in seen]
+        if not fresh:
+            st.last_status = "suppressed"
+            st.last_note = f"{len(hits)} 条信号此前都已推送过"
+            self._dirty = True
+            return ""
+
+        # 一轮只推一条：挑等级最高的（同等级取最新的）
+        pick = max(fresh, key=lambda a: (a.rank, a.issuetime))
+        key = f"{pick.area_code}|{pick.signal}|{pick.level}"
         last_at = _parse_iso(st.last_alert_at)
         if (key == st.last_alert_key and last_at is not None
                 and (now - last_at).total_seconds() < job.repeat_min * 60):
             st.last_status = "suppressed"
-            st.last_note = f"同一组信号（{key}）在 {job.repeat_min} 分钟静默期内"
+            st.last_note = (f"同一信号（{pick.signal}{pick.level}）在 "
+                            f"{job.repeat_min} 分钟静默期内")
+            _append_ids(st, [pick.alertid])
             self._dirty = True
             return ""
 
-        if not self._submit(job, scheduled,
-                            extra_inputs={"alarm": format_alarm(hits)}):
+        if not self._submit(job, scheduled, extra_inputs={
+                "alarm": alarms.format_for_model([pick], limit=1),
+                "alarm_topic": alarms.topic_keywords(pick.signal)}):
             return ""
         st.last_alert_key = key
         st.last_alert_at = _iso(now)
+        _append_ids(st, [pick.alertid])
         self._dirty = True
         self._emit({"type": "alarm", "job": job.id,
-                    "text": f"{job.title or job.id}：命中 {key}"})
-        return job.id
+                    "text": f"{job.title or job.id}：{pick.signal}{pick.level}预警"})
+        return pick.alertid
 
     # ---- 提交 ----
 
@@ -1138,12 +1176,24 @@ class Scheduler:
             return ""
         now = datetime.now().replace(microsecond=0)
         if job.kind == "weather_watch":
-            hits = evaluate_rules(
-                parse_weather(self._fetch(str(job.inputs.get("city") or ""),
-                                          "tomorrow")), job.rules)
-            return self._submit(job, now,
-                                extra_inputs={"alarm": format_alarm(hits)
-                                              or "（手动运行，未命中规则）"})
+            # ★ 手动运行走**同一个判定**（读官方信号）。否则"我手动跑的
+            #   怎么和自动推的不一样"会变成每次都要解释的事。
+            alerts, error = alarms.fetch_alerts()
+            if error:
+                self._emit({"type": "degraded", "job": job.id,
+                            "text": f"「{job.title or job.id}」{error}，本次不判定。"})
+                return ""
+            hits = alarms.match(alerts, area_hint=str(job.inputs.get("city") or ""))
+            if hits:
+                pick = max(hits, key=lambda a: (a.rank, a.issuetime))
+                return self._submit(job, now, extra_inputs={
+                    "alarm": alarms.format_for_model([pick], limit=1),
+                    "alarm_topic": alarms.topic_keywords(pick.signal)})
+            # 没有生效预警也给一条：手动运行通常是"想看看它会说什么"
+            return self._submit(job, now, extra_inputs={
+                "alarm": ("（手动运行）当前没有生效的预警信号，"
+                          "以下按次日预报与常规农事整理。"),
+                "alarm_topic": alarms.DEFAULT_TOPIC})
         return self._submit(job, now, extra_inputs=None)
 
     def _watch(self, job: Job, run_id: str) -> None:

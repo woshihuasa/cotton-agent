@@ -203,6 +203,11 @@ def _builtin_specs() -> list[NodeSpec]:
             params=(
                 ParamSpec("query", "string", True, description="检索语句（可含 {{输入}}）"),
                 ParamSpec("top_k", "number", False, default=3),
+                # ★ 空结果是否算失败。默认 True（固定口径的查询，空 = 库没建好）；
+                #   预警那种"按信号临时找措施"的场景传 false —— 库里没这条主题
+                #   很常见，不该因此让整条预警发不出去。
+                ParamSpec("optional", "boolean", False, default=False,
+                          description="检索为空时不判失败（预警类用）"),
             ),
             side_effect=SideEffect.NONE,          # 只读本地向量库
             source="core/orchestration/catalog.py",
