@@ -1223,13 +1223,12 @@ class Scheduler:
         level = alert.level or ""
         title = f"{signal}{level}预警" if level else f"{signal}预警"
 
-        # 「24小时」→「24 小时」，中文里数字与单位之间留空格更好读
-        shown = re.sub(r"(\d+)(小时|分钟|天)", r"\1 \2", window) if window else ""
-        fact_lines = [f"【{title}】"]
-        if shown:
-            fact_lines.append(f"未来 {shown}内需注意，气象台原文：")
-        fact_lines.append(body or alert.title)
-        meta = {"title": title, "preamble": "\n".join(fact_lines), "url": url}
+        # ★ 正文是**给人读的一句话**，不是"栏目 + 原文"。
+        #   形如「广昌县预计未来24小时内……阵风可达7-8级，请注意防范。」
+        #   发布单位与发布时间已经由标题和时间戳表达，正文里不再重复。
+        area = alarms.short_area(alert.unit) or ""
+        brief = alarms.clean_brief(body or alert.title, area)
+        meta = {"title": title, "preamble": brief, "url": url}
         extra = {
             "alarm": body or alert.title,
             "alarm_level": level or "未标注",
@@ -1299,7 +1298,7 @@ class Scheduler:
         title = str(meta.get("title") or job.title or job.id)
         preamble = str(meta.get("preamble") or "").strip()
         if preamble:
-            text = f"{preamble}\n\n{text}".strip()
+            text = f"{preamble}\n\n农事建议：\n{text}".strip()
         url = str(meta.get("url") or "").strip()
         if url:
             text = f"{text}\n\n原文：{url}"

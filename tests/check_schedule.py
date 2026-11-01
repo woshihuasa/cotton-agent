@@ -825,11 +825,14 @@ def section_alarm(c: Checker) -> None:
         meta, extra = sched._alert_payload(pick)
         c.check("★ 推送标题就是等级（不再固定成任务名）",
                 meta["title"] == "大风蓝色预警", str(meta.get("title")))
-        c.check("★ 前置事实块含等级与时效",
-                "【大风蓝色预警】" in meta["preamble"]
-                and "未来 24 小时" in meta["preamble"], meta.get("preamble"))
-        c.check("★ 事实块引的是官方原文（有量级）",
-                "阵风7级" in meta["preamble"], meta.get("preamble"))
+        c.check("★ 正文是可直接读的一句话（以地名开头）",
+                meta["preamble"].startswith("阿克苏地区"), meta.get("preamble"))
+        c.check("★ 保留官方的时效与量级（一个数字都不改）",
+                "预计未来24小时内" in meta["preamble"]
+                and "阵风7级" in meta["preamble"], meta.get("preamble"))
+        c.check("★ 不再出现「气象台原文」这类栏目措辞，也不重复发布单位",
+                "气象台原文" not in meta["preamble"]
+                and "气象台" not in meta["preamble"], meta.get("preamble"))
         c.check("★ 附原文链接", meta.get("url", "").startswith("http"), str(meta.get("url")))
 
         # ② 同一条信号（同一 alertid）不再重复

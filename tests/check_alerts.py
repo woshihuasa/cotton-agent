@@ -156,6 +156,31 @@ def section_detail(c: Checker) -> None:
             alarms.parse_detail(html6)["window"] == "6小时",
             str(alarms.parse_detail(html6)["window"]))
 
+    # ★ 语气：正文是给人读的一句话，不是"栏目 + 原文"
+    b = ("广昌县气象台2026年11月01日22时39分发布大风蓝色预警信号：预计未来24小时内，"
+         "受冷空气南下影响，阵风可达7-8级，请注意防范。")
+    cleaned = alarms.clean_brief(b, "广昌县")
+    c.check("★ 去掉「发布单位+时间+信号名」那截（标题里已经有了）",
+            cleaned.startswith("广昌县预计"), cleaned)
+    c.check("★ 定量描述一个字不改",
+            "未来24小时内" in cleaned and "阵风可达7-8级" in cleaned, cleaned)
+    c.check("「我县」被去掉（前面已带地名）",
+            "我县" not in alarms.clean_brief(
+                "某县气象台发布大风蓝色预警信号：预计未来24小时内我县将出现6级大风。",
+                "某县"))
+    c.check("没有冒号时整段保留",
+            alarms.clean_brief("预计未来6小时有雷雨大风。", "某县")
+            == "某县预计未来6小时有雷雨大风。")
+
+    c.check("地名取最后一级（省/市/县 长串 → 县级）",
+            alarms.short_area("广西壮族自治区桂林市全州县气象台") == "全州县",
+            alarms.short_area("广西壮族自治区桂林市全州县气象台"))
+    c.check("地名取最后一级（地区）",
+            alarms.short_area("新疆维吾尔自治区阿克苏地区气象台") == "阿克苏地区",
+            alarms.short_area("新疆维吾尔自治区阿克苏地区气象台"))
+    c.check("只有一个县级时原样返回",
+            alarms.short_area("恭城县气象台") == "恭城县")
+
     c.check("空页面 → 空结构（不抛）",
             alarms.parse_detail("") == {"body": "", "defense": "", "window": ""})
 

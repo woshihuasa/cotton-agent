@@ -231,7 +231,62 @@ def match(alerts: list[Alert], *, area_hint: str = "",
     return list(alerts)
 
 
+#: 行政区划后缀（取最后一个作为称呼，如「广西…桂林市全州县」→「全州县」）
+#: 强边界：出现这些就说明前面是更高一级的行政区
+_STRONG_BOUNDARY_RE = re.compile(r"自治区|地区|省|市")
+#: 「XX气象台1日22时32分发布大风蓝色预警信号：」这一截
+_LEAD_RE = re.compile(r"^.*?预警信号\s*[：:]\s*")
+
 _WINDOW_RE = re.compile(r"未来\s*(\d+)\s*(小时|分钟|天)")
+
+
+def short_area(unit: str) -> str:
+    """「广西壮族自治区桂林市全州县气象台」→「全州县」。
+
+    ★ 只取最后一级行政区：用户要的是"哪里"，不是"省级+市级+县级"的完整链条。
+      认不出就返回去掉"气象台"之后的全串（不硬猜）。
+    """
+    text = str(unit or "").strip()
+    if not text:
+        return ""
+    base = text[:-3] if text.endswith("气象台") else text
+    # ★ 只按**强边界**（自治区/地区/省/市）切，取最后一段。
+    #   为什么不去切 县/区/旗/州：像「全州县」这种，"州" 是名字的一部分而不是边界，
+    #   按后缀逐个切会切出孤零零一个「县」。强边界不存在时，整串就是最后一级。
+    strong = list(_STRONG_BOUNDARY_RE.finditer(base))
+    if not strong:
+        return base
+    cut = strong[-1].end()
+    tail = base[cut:]
+    if tail:
+        return tail
+    prev = strong[-2].end() if len(strong) > 1 else 0
+    return base[prev:cut]
+
+
+def clean_brief(body: str, area: str = "") -> str:
+    """详情正文 → 一句能直接读的话。
+
+    例：
+      「广昌县气象台2026年11月01日22时39分发布大风蓝色预警信号：预计未来24小时内，
+        受冷空气南下影响，……阵风可达7-8级，请注意防范。」
+      →「广昌县预计未来24小时内，受冷空气南下影响，……阵风可达7-8级，请注意防范。」
+
+    ★ 去掉的是"发布单位 + 发布时间 + 信号名"这一截**已经出现在标题里**的信息；
+      正文的定量描述一个字不动（那是唯一有信息量的部分）。
+    """
+    text = str(body or "").strip()
+    if not text:
+        return ""
+    m = _LEAD_RE.match(text)
+    desc = text[m.end():].strip() if m else text
+    if not desc:
+        desc = text
+    # 「我县/本县」→ 去掉，前面已经带上地名
+    for word in ("我县", "本县", "我区", "本区", "我市", "本市"):
+        desc = desc.replace(word, "")
+    return f"{area}{desc}" if area else desc
+
 _TAG_RE = re.compile(r"<[^>]+>")
 
 
@@ -312,5 +367,6 @@ def format_for_model(alerts: list[Alert], *, limit: int = 8) -> str:
 
 __all__ = ["Alert", "DEFAULT_TOPIC", "LEVEL_RANK", "LIST_API", "SIGNAL_TOPICS",
            "area_code_of", "clear_cache", "fetch_alerts", "format_for_model",
-           "fetch_detail", "match", "parse_detail", "parse_title",
+           "clean_brief", "fetch_detail", "match", "parse_detail", "parse_title",
+           "short_area",
            "topic_keywords"]
