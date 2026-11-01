@@ -833,7 +833,17 @@ def section_alarm(c: Checker) -> None:
         c.check("★ 不再出现「气象台原文」这类栏目措辞，也不重复发布单位",
                 "气象台原文" not in meta["preamble"]
                 and "气象台" not in meta["preamble"], meta.get("preamble"))
-        c.check("★ 附原文链接", meta.get("url", "").startswith("http"), str(meta.get("url")))
+        c.check("原文链接仍被记下（写进存档，不进正文）",
+                meta.get("url", "").startswith("http"), str(meta.get("url")))
+
+        # ★ 正文里**不许**出现链接与栏目标签
+        composed = S.compose_alert_text(meta["preamble"], "加固棚膜；风大暂停喷药。")
+        c.check("★ 正文不含 URL（用户只要该做什么）",
+                "http" not in composed and "原文：" not in composed, composed[:60])
+        c.check("★ 正文结构：事实一句 +「农事建议：」+ 建议",
+                composed.startswith("阿克苏地区")
+                and "\n\n农事建议：\n" in composed
+                and composed.endswith("风大暂停喷药。"), composed[:80])
 
         # ② 同一条信号（同一 alertid）不再重复
         t1 = t0 + timedelta(minutes=watch.repeat_min + 1)

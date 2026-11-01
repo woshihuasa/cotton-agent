@@ -264,6 +264,60 @@ def short_area(unit: str) -> str:
     return base[prev:cut]
 
 
+#: 乡镇级地名的连续列举：「赤水镇、甘竹镇、…、长桥乡」
+#: ★ 必须**从句读边界开始**（前面是逗号/分号/冒号）。
+#:   松弛地匹配会把「未来6小时内甲镇」里的「内甲镇」也吃进去，替换后变成
+#:   「未来6全市将出现」—— 这种"吞掉半边句子"的错，比多留几个乡镇名糟得多。
+_TOWNS_RE = re.compile(
+    r"(?<=[，。；：、\s])[\u4e00-\u9fa5]{2,8}(?:镇|乡|街道|苏木|团场|农场|村)"
+    r"(?:、[\u4e00-\u9fa5]{2,8}(?:镇|乡|街道|苏木|团场|农场|村))+")
+
+#: 单个乡镇名（不在列举里时只保留区县一级也够用）
+_ONE_TOWN_RE = re.compile(r"[\u4e00-\u9fa5]{2,6}(?:镇|乡|街道|苏木|团场|农场|村)")
+
+
+#: 句首时效：「预计未来6小时内」「48小时内」
+_TIME_LEAD_RE = re.compile(r"^(?:预计)?\s*(?:未来)?\s*\d+\s*(?:小时|分钟|天)\s*内?")
+
+#: 天气词与谓词：用来在"地名清单 + 天气描述"混在一起时找到天气那一半
+_WEATHER_WORDS: tuple[str, ...] = (
+    "阵风", "平均风", "风力", "大风", "气温", "温度", "降温", "升温", "高温", "低温",
+    "降雨", "雨量", "降水", "暴雨", "降雪", "积雪", "能见度", "雷电", "冰雹",
+    "沙尘", "寒潮", "冷空气", "霜冻", "大雾", "霾",
+    "将出现", "可出现", "可达", "达到", "伴有",
+)
+
+
+def _strip_place_prefix(seg: str) -> str:
+    """一句里若混着地名清单，就从第一个天气词开始留。
+
+    例：「赤水镇、甘竹镇……高海拔山区阵风可达7-8级」→「阵风可达7-8级」
+        「受冷空气南下影响」→ 原样（没有地名清单，且本身就是天气）
+    """
+    text = str(seg or "").strip()
+    if not text:
+        return ""
+    # ★ 单个乡镇也照样去掉：分辨率统一到区县一级，不做"有的句子带镇名、
+    #   有的不带"的半吊子状态。
+    has_list = (bool(_TOWNS_RE.search(text)) or bool(_ONE_TOWN_RE.search(text))
+                or ("、" in text))
+    if not has_list:
+        return text
+    # ★ 先保住句首的时效（"预计未来6小时内"），它属于天气信息，不是地名。
+    #   没有这一步，"预计未来6小时内城关镇降雨量将达50毫米" 会被截成
+    #   "降雨量将达50毫米"，把最重要的"什么时候"丢掉了。
+    lead = ""
+    m = _TIME_LEAD_RE.match(text)
+    if m:
+        lead = m.group(0)
+        text = text[m.end():].lstrip("，、 ")
+    positions = [text.find(w) for w in _WEATHER_WORDS if text.find(w) >= 0]
+    if not positions:
+        return lead                     # 剩下全是地名 → 只留时效
+    cut = min(positions)
+    return lead + text[cut:]
+
+
 def clean_brief(body: str, area: str = "") -> str:
     """详情正文 → 一句能直接读的话。
 
@@ -282,6 +336,15 @@ def clean_brief(body: str, area: str = "") -> str:
     desc = text[m.end():].strip() if m else text
     if not desc:
         desc = text
+    # ★ 地名清单**整段删掉**，不要用「全县」之类的词去顶替 —— 用户要的是天气本身。
+    #   做法：按逗号分句，凡含乡镇/地形列举的那一句，从**第一个天气词**起截取
+    #   （"赤水镇、甘竹镇……山区阵风可达7-8级" → "阵风可达7-8级"）。
+    #   纯天气的句子（"受冷空气南下影响"）原样保留。
+    segs = []
+    for seg in desc.split("，"):
+        segs.append(_strip_place_prefix(seg.strip()))
+    desc = "，".join(x for x in segs if x)
+    desc = re.sub(r"[，、]{2,}", "，", desc).strip("，、 ")
     # 「我县/本县」→ 去掉，前面已经带上地名
     for word in ("我县", "本县", "我区", "本区", "我市", "本市"):
         desc = desc.replace(word, "")

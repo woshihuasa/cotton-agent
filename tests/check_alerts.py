@@ -172,6 +172,23 @@ def section_detail(c: Checker) -> None:
             alarms.clean_brief("预计未来6小时有雷雨大风。", "某县")
             == "某县预计未来6小时有雷雨大风。")
 
+    # ★ 地名清单整段删掉，只留天气（分辨率到区县）
+    messy = ("广昌县气象台发布大风蓝色预警信号：预计未来24小时内，受冷空气南下影响，"
+             "赤水镇、甘竹镇、长桥乡江湖水面和高海拔山区阵风可达7-8级，请注意防范。")
+    out = alarms.clean_brief(messy, "广昌县")
+    c.check("★ 乡镇清单被整段删掉（不留「全县」这种替代词）",
+            "赤水镇" not in out and "甘竹镇" not in out and "全县" not in out, out)
+    c.check("★ 只保留天气部分，且以地名开头",
+            out.startswith("广昌县预计未来24小时内") and "阵风可达7-8级" in out, out)
+    c.check("★ 纯天气的从句保留（冷空气南下是天气，不是地名）",
+            "受冷空气南下影响" in out, out)
+
+    single = ("某县气象台发布暴雨黄色预警信号：预计未来6小时内城关镇降雨量将达50毫米以上，"
+              "请注意防范。")
+    out2 = alarms.clean_brief(single, "某县")
+    c.check("★ 单个乡镇也去掉，但保住句首的时效",
+            "城关镇" not in out2 and out2.startswith("某县预计未来6小时内"), out2)
+
     c.check("地名取最后一级（省/市/县 长串 → 县级）",
             alarms.short_area("广西壮族自治区桂林市全州县气象台") == "全州县",
             alarms.short_area("广西壮族自治区桂林市全州县气象台"))

@@ -334,6 +334,20 @@ _FIELD_LABEL: dict[str, str] = {
 }
 
 
+def compose_alert_text(preamble: str, advice: str) -> str:
+    """预警推送正文 = 一句客观事实 + 「农事建议：」 + 模型建议。
+
+    ★ **不放原文链接**：农户要的是"现在该做什么"，一条带 URL 的尾巴只会让消息
+      显得像剪报。原文链接仍然记在档案里（`_archive(..., source_url=...)`），
+      需要核对时从存档翻，不占推送版面。
+    """
+    fact = str(preamble or "").strip()
+    tip = str(advice or "").strip()
+    if fact and tip:
+        return f"{fact}\n\n农事建议：\n{tip}"
+    return fact or tip
+
+
 def _split_ids(text: str) -> set[str]:
     """状态里存的 `reported_ids`（逗号分隔）→ 集合。"""
     return {x.strip() for x in str(text or "").split(",") if x.strip()}
@@ -1288,32 +1302,32 @@ class Scheduler:
                                 f"{st.last_note}"})
             return
 
-        path = self._archive(job, text)
+        meta = self._notice_meta.pop(run_id, {}) or {}
+        path = self._archive(job, text, source_url=str(meta.get("url") or ""))
         st.last_status = "delivered"
         st.last_note = f"已推送；存档 {path.name if path else '（未写成）'}"
         self._dirty = True
         self.save_state()
-        # ★ 客观部分前置：等级 + 官方定量描述；模型写的建议接在后面；末尾给原文链接。
-        meta = self._notice_meta.pop(run_id, {}) or {}
+        # ★ 客观部分前置：一句事实 + 「农事建议：」+ 模型建议。
+        #   链接**不进正文**，只随存档留下（`_archive` 的 source_url）。
         title = str(meta.get("title") or job.title or job.id)
-        preamble = str(meta.get("preamble") or "").strip()
-        if preamble:
-            text = f"{preamble}\n\n农事建议：\n{text}".strip()
-        url = str(meta.get("url") or "").strip()
-        if url:
-            text = f"{text}\n\n原文：{url}"
+        text = compose_alert_text(str(meta.get("preamble") or ""), text)
         self._emit({"type": "notice", "job": job.id, "run_id": run_id,
                     "title": title, "text": text,
                     "path": str(path) if path else ""})
 
-    def _archive(self, job: Job, text: str) -> Path | None:
+    def _archive(self, job: Job, text: str, *, source_url: str = "") -> Path | None:
         """把推送内容落一份 Markdown 存档（用户事后能翻，而不是只有聊天气泡）。"""
         try:
             from config import app_data_dir
             d = app_data_dir() / "reports"
             d.mkdir(parents=True, exist_ok=True)
             p = d / f"{job.id}-{datetime.now():%Y-%m-%d}.md"
-            p.write_text(f"# {job.title or job.id}\n\n{text}\n", encoding="utf-8")
+            body = f"# {job.title or job.id}\n\n{text}\n"
+            # ★ 原文链接只留在存档里 —— 推送正文要干净，核对时来翻这份文件。
+            if source_url:
+                body += f"\n---\n原文：{source_url}\n"
+            p.write_text(body, encoding="utf-8")
             return p
         except OSError as e:
             log.warning("简报存档写不出去：%s", e)
