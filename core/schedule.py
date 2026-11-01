@@ -46,6 +46,11 @@ from core import alarms
 
 log = logging.getLogger("Schedule")
 
+#: `run_now` 的哨兵：**没有可跑的东西，但已经处理过了**（例如无生效预警）。
+#: ★ 不能用空串 —— 空串表示"没启动起来"，`_run_now_worker` 会据此发失败事件。
+NO_ALERT_SENTINEL = "no-alert"
+
+
 #: 轮询间隔（秒）。判定本身是纯计算，30 秒足够准到「分钟内」。
 TICK_SECONDS = 30.0
 
@@ -561,12 +566,8 @@ def default_jobs() -> list[Job]:
             workflow="daily_brief.yaml",
             kind="workflow",
             enabled=True,
-            # ★ 验收期节奏：每小时一次。
-            #   正式口径是 `Trigger(kind="daily", at="08:00")` —— 每天清晨一次。
-            #   现在改成间隔是为了**装到机器上能马上看到推送**，不用等到第二天早上。
-            #   恢复出厂：改成 `Trigger(kind="daily", at="08:00")`，或删掉
-            #   `runtime_data/schedule/schedule.json` 让它按默认重建。
-            trigger=Trigger(kind="interval", every_min=60),
+            # 正式口径：每天清晨一次（08:00）。
+            trigger=Trigger(kind="daily", at="08:00"),
             inputs={"city": DEFAULT_CITY, "region": DEFAULT_REGION},
             grace_min=DEFAULT_GRACE_MIN,
             notice_node="brief",
@@ -1190,6 +1191,8 @@ class Scheduler:
             self._emit({"type": "failed", "job": job_id,
                         "text": f"手动运行失败：{type(e).__name__}: {e}"})
             return
+        if run_id == NO_ALERT_SENTINEL:
+            return                     # 已经发过"无生效预警"，不算失败
         if not run_id:
             self._emit({"type": "failed", "job": job_id,
                         "text": "手动运行没能启动 —— 见状态栏或日志"})
@@ -1214,24 +1217,23 @@ class Scheduler:
                 meta, extra = self._alert_payload(pick)
                 return self._submit(job, now, extra_inputs=extra,
                                     notice_meta=meta)
-            # ★ 没有生效预警时也要说清楚"这不是预警"。
-            #   用户点「立即运行」是想看看它会说什么；若不给告知，模型会照着知识库
-            #   写一整段季节管理（"花铃期要盯住土壤墒情……"），看起来像一条预警 ——
-            #   而实际上当地什么预警都没发。那是**把"没事"包装成"有事"**。
+            # ★★ 无生效预警 → **只给事实，不生成建议**（用户 2026-11-02 定的口径）。
+            #
+            #   原先会让模型写一段"常规提醒"，但它只拿到知识库的通用摘录
+            #   （"田间管理 水肥调控 病虫害防治"），既不知道当天天气、也不知道现在
+            #   几月 —— 11 月给你一份"花铃期管理"（7-8 月的方案）。那不是提醒，是误导。
+            #   "今天没有预警"本身就是完整的信息，不需要配话。
             count = len(alerts)
-            meta = {
-                "title": "当前无生效预警",
-                "preamble": (f"{job.inputs.get('city') or ''}当前没有生效的气象预警"
-                             f"（全国 {count} 条在效）。以下是按季节整理的常规提醒，"
-                             f"不是预警。"),
-                "url": "",
-            }
-            return self._submit(job, now, extra_inputs={
-                "alarm": "当前没有生效的预警信号。",
-                "alarm_level": "无",
-                "alarm_window": "",
-                "official_advice": "",
-                "alarm_topic": alarms.DEFAULT_TOPIC}, notice_meta=meta)
+            city = str(job.inputs.get("city") or "")
+            text = f"{city}当前没有生效的气象预警（全国 {count} 条在效）。"
+            st = self.state_of(job.id)
+            st.last_status = "no-alarm"
+            st.last_note = "手动运行：当前无生效预警"
+            self._dirty = True
+            self.save_state()
+            self._emit({"type": "notice", "job": job.id, "run_id": "",
+                        "title": "当前无生效预警", "text": text, "path": ""})
+            return NO_ALERT_SENTINEL
         return self._submit(job, now, extra_inputs=None)
 
     def _alert_payload(self, alert: alarms.Alert) -> tuple[dict, dict]:

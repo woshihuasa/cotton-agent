@@ -887,15 +887,26 @@ def section_alarm(c: Checker) -> None:
                     notices[0].get("title") == "大风蓝色预警",
                     str(notices[0].get("title")))
 
-        # ★ 手动运行且**没有**生效预警：必须标明"这不是预警"
+        # ★ 手动运行且**没有**生效预警：只发一条事实，**不调模型、不检索**
         _feed([])
-        sched_m, runner_m, _ = _fresh(watch)
-        sched_m.run_now("weather_watch")
-        c.check("★ 手动运行无预警时仍会生成一条（便于自检）",
-                bool(runner_m.submitted), str(len(runner_m.submitted)))
-        c.check("★ 但等级字段是「无」，不是编一个",
-                runner_m.submitted[0][2].get("alarm_level") == "无",
-                str(runner_m.submitted[0][2].get("alarm_level")))
+        sched_m, runner_m, events_m = _fresh(watch)
+        rid = sched_m.run_now("weather_watch")
+        notices_m = [e for e in events_m if e.get("type") == "notice"]
+        c.check("★ 无预警时发一条 notice（不是跑一遍工作流）",
+                bool(notices_m) and runner_m.submitted == [],
+                f"notice {len(notices_m)} / submitted {len(runner_m.submitted)}")
+        if notices_m:
+            c.check("★ 正文只有事实，没有「农事建议」",
+                    "没有生效的气象预警" in str(notices_m[0].get("text"))
+                    and "农事建议" not in str(notices_m[0].get("text")),
+                    str(notices_m[0].get("text")))
+            c.check("标题是「当前无生效预警」",
+                    notices_m[0].get("title") == "当前无生效预警",
+                    str(notices_m[0].get("title")))
+        c.check("★ 返回哨兵值（不当作失败）", rid == S.NO_ALERT_SENTINEL, str(rid))
+        c.check("状态记成 no-alarm",
+                sched_m.state_of("weather_watch").last_status == "no-alarm",
+                sched_m.state_of("weather_watch").last_status)
 
         # ④ 没有生效信号 → 不报
         _feed([])
