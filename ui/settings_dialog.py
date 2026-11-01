@@ -27,6 +27,7 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtWidgets import (
     QApplication,
+    QComboBox,
     QDialog,
     QFormLayout,
     QFrame,
@@ -45,6 +46,43 @@ from PyQt6.QtWidgets import (
 from core.config_manager import ConfigManager
 
 # ── 样式 ───────────────────────────────────────────
+
+def _search_combo_qss() -> str:
+    """「联网搜索后端」下拉的样式。
+
+    ★ 与模型下拉同一套观感（圆角字段 + 项目自带的箭头图标），
+      避免设置页里出现两种长相的下拉。
+    """
+    from config import resource_path
+    arrow = str(resource_path("ui/icons/arrow_down.svg")).replace("\\", "/")
+    return """
+QComboBox#searchBackend {
+    background: #FFFFFF;
+    border: 1px solid #E0E0E4;
+    border-radius: 6px;
+    padding: 5px 10px;
+    font-size: 12px;
+    color: #1f2328;
+}
+QComboBox#searchBackend:hover { border-color: #C9CDD4; }
+QComboBox#searchBackend:focus { border-color: #8AB8E8; }
+QComboBox#searchBackend::drop-down {
+    width: 22px; border: none; background: transparent;
+}
+QComboBox#searchBackend::drop-down:hover { background: #F2F3F5; }
+QComboBox#searchBackend::down-arrow {
+    image: url("%(arrow)s"); width: 10px; height: 6px;
+}
+QComboBox#searchBackend QAbstractItemView {
+    background: #FFFFFF; border: 1px solid #E3E5E8; border-radius: 8px;
+    padding: 6px; outline: none;
+    selection-background-color: #F2F3F5; selection-color: #1f2328;
+}
+QComboBox#searchBackend QAbstractItemView::item {
+    min-height: 28px; padding: 4px 10px; border-radius: 6px;
+}
+""" % {"arrow": arrow}
+
 
 DIALOG_STYLE = """
 QDialog {
@@ -458,6 +496,21 @@ class SettingsDialog(QDialog):
         self._tavily_key.setPlaceholderText("tvly-...")
         other_form.addRow(self._label("Tavily Search Key:"), self._tavily_key)
 
+        # ★ 联网搜索的后端（`core/tools/external.pick_backend()` 读它）。
+        #   以前只能改 .env，界面上没有入口 —— 等于"做了但用不上"。
+        self._search_backend = QComboBox()
+        self._search_backend.setObjectName("searchBackend")
+        self._search_backend.setStyleSheet(_search_combo_qss())
+        for _label, _value in (("自动（优先 Tavily）", "auto"),
+                               ("Tavily", "tavily"),
+                               ("DeepSeek 搜索", "deepseek")):
+            self._search_backend.addItem(_label, _value)
+        self._search_backend.setToolTip(
+            "「自动」= 配了 Tavily Key 就用 Tavily，没配才用 DeepSeek 搜索。\n"
+            "DeepSeek 搜索需要已配置 DeepSeek Key（见「模型」分组），"
+            "按成功请求计费。")
+        other_form.addRow(self._label("联网搜索后端:"), self._search_backend)
+
         # ── Web 服务 ──
         web_group = QGroupBox("Web 服务（浏览器访问）")
         web_layout = QVBoxLayout(web_group)
@@ -582,6 +635,10 @@ class SettingsDialog(QDialog):
         # （服务商 + 凭据层 + 三个键里只剩"选谁"由 `EMBEDDING_PROVIDER` 表达）。
         self._amap_key.setText(data.get("AMAP_API_KEY", ""))
         self._tavily_key.setText(data.get("TAVILY_API_KEY", ""))
+        _backend = str(data.get("WEB_SEARCH_BACKEND", "") or "auto").strip().lower()
+        _idx = self._search_backend.findData(_backend if _backend in
+                                             ("auto", "tavily", "deepseek") else "auto")
+        self._search_backend.setCurrentIndex(max(0, _idx))
 
     # ── Web 服务 ──────────────────────────────────
 
@@ -672,5 +729,7 @@ class SettingsDialog(QDialog):
         ConfigManager.save({
             "AMAP_API_KEY": self._amap_key.text().strip(),
             "TAVILY_API_KEY": self._tavily_key.text().strip(),
+            # 联网搜索后端（auto/tavily/deepseek）；热更新，保存后即生效
+            "WEB_SEARCH_BACKEND": str(self._search_backend.currentData() or "auto"),
         })
         self.accept()

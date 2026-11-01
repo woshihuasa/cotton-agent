@@ -21,6 +21,10 @@ MANAGED_KEYS = {
     "EMBEDDING_BASE_URL",
     "EMBEDDING_MODEL",
     "HF_ENDPOINT",
+    # ★ 联网搜索后端（auto/tavily/deepseek）。
+    #   它是**受管键**，必须列在这里 —— 否则 `save()` 写进 .env 了，`load()`
+    #   却读不回来（界面重开就回显成默认值，看着像没保存成功）。
+    "WEB_SEARCH_BACKEND",
 }
 
 

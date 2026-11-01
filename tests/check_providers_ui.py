@@ -612,6 +612,44 @@ def main() -> int:
         c.check("★ 浮层可滚动（不应抛异常）", False,
                 f"{type(e).__name__}: {e}")
 
+    # ------------------------------------------------------------------
+    c.section("第 12 节：★ 联网搜索后端（设置里能改，且改完读得回来）")
+    # ------------------------------------------------------------------
+    c.check("设置里有「联网搜索后端」控件", hasattr(s, "_search_backend"))
+    opts = [(s._search_backend.itemText(i), s._search_backend.itemData(i))
+            for i in range(s._search_backend.count())]
+    c.check("★ 三个选项：自动 / Tavily / DeepSeek",
+            [v for _l, v in opts] == ["auto", "tavily", "deepseek"], str(opts))
+    c.check("默认是「自动」（升级后行为不变）",
+            s._search_backend.itemData(0) == "auto", str(opts[:1]))
+
+    # ★ 这条是本次踩过的坑：键不在 MANAGED_KEYS 里 → save() 写进 .env 了，
+    #   load() 却读不回来 → 界面重开显示默认值，看着像"没保存成功"。
+    import shutil
+    import tempfile
+    from core import config_manager as _cm
+    c.check("★ `WEB_SEARCH_BACKEND` 在 `ConfigManager.MANAGED_KEYS` 里",
+            "WEB_SEARCH_BACKEND" in _cm.MANAGED_KEYS,
+            str(sorted(_cm.MANAGED_KEYS)))
+
+    # 用临时 .env 做一次真实存取往返（**不碰用户自己的 .env**）
+    _old_env = _cm.ENV_PATH
+    _tmpdir = Path(tempfile.mkdtemp(prefix="cotton_env_"))
+    _cm.ENV_PATH = _tmpdir / ".env"
+    try:
+        s._search_backend.setCurrentIndex(s._search_backend.findData("deepseek"))
+        s._on_save()
+        got = _cm.ConfigManager.load().get("WEB_SEARCH_BACKEND")
+    finally:
+        _cm.ENV_PATH = _old_env
+        shutil.rmtree(_tmpdir, ignore_errors=True)
+    c.check("★ 保存后在 .env 里读得回 deepseek（存取往返）",
+            got == "deepseek", str(got))
+
+    c.check("★ Embedding 页那条 rerank 备注已删除",
+            provider_editor.KIND_SPECS["embedding"].footnote == "",
+            repr(provider_editor.KIND_SPECS["embedding"].footnote))
+
     print()
     print("=" * 78)
     print(f"模型提供商界面守卫: {c.passed}/{c.total} 通过"

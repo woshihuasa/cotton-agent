@@ -110,7 +110,7 @@ KIND_SPECS: dict[str, KindSpec] = {
         backend=providers,
         noun="模型提供商",
         add_text="＋  添加模型提供商",
-        hint="填入各提供商的 API 密钥即可使用其模型。密钥只写不读，保存后只显示掩码。",
+        hint="密钥保存后不会显示。",
         dialog_new="添加模型提供商",
         default_text="设为默认模型提供商",
         default_done="已把「{name}」设为默认模型提供商",
@@ -119,13 +119,11 @@ KIND_SPECS: dict[str, KindSpec] = {
         backend=embedding_providers,
         noun="Embedding 服务商",
         add_text="＋  添加 Embedding 服务商",
-        hint="填入各服务商的 API 密钥即可用它生成向量。密钥只写不读，保存后只显示掩码。"
-             "换服务商或模型会改变向量维度，保存后需要重建知识库。",
+        hint="密钥保存后不会显示。"
+             "换服务商或模型会改变向量维度，保存后会重建知识库。",
         dialog_new="添加 Embedding 服务商",
         default_text="设为默认 Embedding 服务商",
         default_done="已把「{name}」设为默认 Embedding 服务商",
-        footnote="精排（rerank）默认沿用当前 Embedding 服务商的端点与密钥；"
-                 "要单独指回某一家，可在 .env 里设置 RERANK_BASE_URL / RERANK_API_KEY。",
     ),
 }
 
@@ -292,8 +290,8 @@ class ModelCombo(QComboBox):
         self.setEditable(False)
         self.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         self.setStyleSheet(MODEL_COMBO_QSS)
-        self.setToolTip("从下拉里选择该端点提供的模型。清单来自上次拉取，"
-                        "旁边「拉取清单」可以重新拉一次。")
+        self.setToolTip("从下拉里选择该端点提供的模型"
+                        "点击「拉取清单」可以重新获取")
         self._placeholder_hint = ("BAAI/bge-large-zh-v1.5" if kind == "embedding"
                                   else "qwen3.7-plus")
         self._kind = kind
@@ -449,7 +447,7 @@ class ProviderEditDialog(QDialog):
         self._btn_models.setObjectName("cardBtn")
         self._btn_models.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_models.setToolTip(
-            "用上面填的接口地址与密钥拉取模型清单（新建服务商也能用，不必先保存）")
+            "用上面填的接口地址与密钥拉取模型清单")
         self._btn_models.clicked.connect(self._on_refresh_models)
         model_row.addWidget(self._btn_models)
         form.addRow(QLabel("默认模型:"), model_row)
@@ -457,7 +455,7 @@ class ProviderEditDialog(QDialog):
         # API 密钥：只写。留空 = 不修改
         self._key = QLineEdit()
         self._key.setEchoMode(QLineEdit.EchoMode.Password)
-        self._key.setPlaceholderText("留空 = 不修改现有密钥")
+        self._key.setPlaceholderText("留空则使用当前密钥")
         form.addRow(QLabel("API 密钥:"), self._key)
 
         color, text = _status(spec.get("name", ""), kind)
@@ -546,7 +544,7 @@ class ProviderEditDialog(QDialog):
             self._start_model_fetch(name=name)
         else:
             self._test_msg.setText(
-                "✗ 先填「接口地址」与「API 密钥」（或先保存一次），才能拉到模型清单")
+                "✗ 先填接口地址与API 密钥（或先保存一次），才能拉到模型清单")
             self._test_msg.setStyleSheet(f"font-size:11px; color:{COLOR_OFF};")
 
     def _start_model_fetch(self, *, name: str = "", url: str = "",

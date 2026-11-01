@@ -298,6 +298,8 @@ _RUNTIME_KEYS = (
     "DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL", "DEEPSEEK_MODEL",
     "LLM_PROVIDER", "LLM_MODEL",          # 切换默认服务商 / 模型（热更新）
     "AMAP_API_KEY", "TAVILY_API_KEY",
+    # ★ 联网搜索后端（auto/tavily/deepseek）：在「设置 → 其他 API」里改完即生效
+    "WEB_SEARCH_BACKEND", "DEEPSEEK_SEARCH_URL",
     "EMBEDDING_API_KEY", "EMBEDDING_BASE_URL", "EMBEDDING_MODEL",
     # ★ 切换默认 Embedding 服务商（热更新）：在「设置 → Embedding」里改完立刻生效
     "EMBEDDING_PROVIDER",
