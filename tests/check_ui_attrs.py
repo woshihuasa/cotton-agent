@@ -76,7 +76,7 @@ setFocusPolicy setWordWrap setTextFormat setTextInteractionFlags
 setSizePolicy setAlignment setMinimumHeight setMinimumWidth setContentsMargins
 blockSignals setSelectionMode setIconSize setIcon setStyleSheet
 setEditable setInsertPolicy view clear addItems lineEdit setCurrentText
-itemText currentText count
+itemText currentText count setCheckable setChecked isChecked toggled
 """.split())
 
 

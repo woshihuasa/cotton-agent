@@ -613,24 +613,30 @@ def main() -> int:
                 f"{type(e).__name__}: {e}")
 
     # ------------------------------------------------------------------
-    c.section("第 12 节：★ 联网搜索后端（设置里能改，且改完读得回来）")
+    c.section("第 12 节：★ 联网搜索（两个服务各自开关 + 各自密钥 + 优先级）")
     # ------------------------------------------------------------------
-    c.check("设置里有「联网搜索后端」控件", hasattr(s, "_search_backend"))
+    c.check("两张搜索服务卡片：各自的开关与密钥",
+            all(hasattr(s, a) for a in ("_tavily_on", "_tavily_key",
+                                        "_deepseek_on", "_ds_search_key")))
+    c.check("★ 开关是胶囊控件（`ToggleSwitch`），不是勾选框",
+            type(s._tavily_on).__name__ == "ToggleSwitch"
+            and type(s._deepseek_on).__name__ == "ToggleSwitch",
+            f"{type(s._tavily_on).__name__} / {type(s._deepseek_on).__name__}")
+
     opts = [(s._search_backend.itemText(i), s._search_backend.itemData(i))
             for i in range(s._search_backend.count())]
-    c.check("★ 三个选项：自动 / Tavily / DeepSeek",
-            [v for _l, v in opts] == ["auto", "tavily", "deepseek"], str(opts))
-    c.check("默认是「自动」（升级后行为不变）",
-            s._search_backend.itemData(0) == "auto", str(opts[:1]))
+    c.check("★ 优先级只有两项：Tavily / DeepSeek 搜索",
+            [v for _l, v in opts] == ["tavily", "deepseek"], str(opts))
 
-    # ★ 这条是本次踩过的坑：键不在 MANAGED_KEYS 里 → save() 写进 .env 了，
+    # ★ 本次踩过的坑：键不在 MANAGED_KEYS 里 → save() 写进 .env 了，
     #   load() 却读不回来 → 界面重开显示默认值，看着像"没保存成功"。
     import shutil
     import tempfile
     from core import config_manager as _cm
-    c.check("★ `WEB_SEARCH_BACKEND` 在 `ConfigManager.MANAGED_KEYS` 里",
-            "WEB_SEARCH_BACKEND" in _cm.MANAGED_KEYS,
-            str(sorted(_cm.MANAGED_KEYS)))
+    for key in ("WEB_SEARCH_BACKEND", "WEB_SEARCH_TAVILY_ON",
+                "WEB_SEARCH_DEEPSEEK_ON", "DEEPSEEK_SEARCH_API_KEY"):
+        c.check(f"`{key}` 在 `ConfigManager.MANAGED_KEYS` 里",
+                key in _cm.MANAGED_KEYS)
 
     # 用临时 .env 做一次真实存取往返（**不碰用户自己的 .env**）
     _old_env = _cm.ENV_PATH
@@ -638,13 +644,23 @@ def main() -> int:
     _cm.ENV_PATH = _tmpdir / ".env"
     try:
         s._search_backend.setCurrentIndex(s._search_backend.findData("deepseek"))
+        s._tavily_on.setChecked(False)
+        s._deepseek_on.setChecked(True)
+        s._ds_search_key.setText("sk-ds-search-test")
         s._on_save()
-        got = _cm.ConfigManager.load().get("WEB_SEARCH_BACKEND")
+        got = _cm.ConfigManager.load()
     finally:
         _cm.ENV_PATH = _old_env
         shutil.rmtree(_tmpdir, ignore_errors=True)
-    c.check("★ 保存后在 .env 里读得回 deepseek（存取往返）",
-            got == "deepseek", str(got))
+    c.check("★ 保存后读得回：优先级 = deepseek",
+            got.get("WEB_SEARCH_BACKEND") == "deepseek", str(got.get("WEB_SEARCH_BACKEND")))
+    c.check("★ 保存后读得回：两个开关各自的真假",
+            got.get("WEB_SEARCH_TAVILY_ON") == "0"
+            and got.get("WEB_SEARCH_DEEPSEEK_ON") == "1",
+            f"{got.get('WEB_SEARCH_TAVILY_ON')} / {got.get('WEB_SEARCH_DEEPSEEK_ON')}")
+    c.check("★ 保存后读得回：DeepSeek 搜索的独立密钥",
+            got.get("DEEPSEEK_SEARCH_API_KEY") == "sk-ds-search-test",
+            str(got.get("DEEPSEEK_SEARCH_API_KEY")))
 
     c.check("★ Embedding 页那条 rerank 备注已删除",
             provider_editor.KIND_SPECS["embedding"].footnote == "",

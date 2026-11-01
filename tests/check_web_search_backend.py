@@ -56,35 +56,43 @@ class Checker:
 
 
 def section_pick(c: Checker) -> None:
-    c.section("第 1 节：选后端（auto 必须优先 Tavily，保持原有行为）")
+    c.section("第 1 节：选后端（开关 + 密钥，优先值只决定顺序）")
 
     both = dict(tavily_key="tv", deepseek_key="ds")
-    c.check("★ auto + 两个 Key 都有 → Tavily（升级不改默认行为）",
+    c.check("★ 两个都开都有 Key，优先 Tavily → Tavily",
             ex.pick_backend("", **both)[0] == "tavily", str(ex.pick_backend("", **both)))
-    c.check("auto + 只有 Tavily → Tavily",
-            ex.pick_backend("auto", tavily_key="tv", deepseek_key="")[0] == "tavily")
-    c.check("★ auto + 只有 DeepSeek → DeepSeek（没有 Tavily 才退）",
-            ex.pick_backend("auto", tavily_key="", deepseek_key="ds")[0] == "deepseek")
-    name, why = ex.pick_backend("auto", tavily_key="", deepseek_key="")
-    c.check("★ auto + 都没有 → 报错并说明两个都没配",
-            name == "" and "Tavily" in why and "DeepSeek" in why, why)
-
-    c.check("强制 tavily 且有 Key → tavily",
-            ex.pick_backend("tavily", **both)[0] == "tavily")
-    name, why = ex.pick_backend("tavily", tavily_key="", deepseek_key="ds")
-    c.check("★ 强制 tavily 但没 Key → 报错，**不静默换 DeepSeek**",
-            name == "" and "TAVILY_API_KEY" in why, why)
-
-    c.check("强制 deepseek 且有 Key → deepseek",
+    c.check("★ 优先 DeepSeek → DeepSeek",
             ex.pick_backend("deepseek", **both)[0] == "deepseek")
-    name, why = ex.pick_backend("deepseek", tavily_key="tv", deepseek_key="")
-    c.check("★ 强制 deepseek 但没 Key → 报错，不静默换 Tavily",
-            name == "" and "DEEPSEEK_API_KEY" in why, why)
+    c.check("旧值 auto 等价于优先 Tavily",
+            ex.pick_backend("auto", **both)[0] == "tavily")
 
-    name, why = ex.pick_backend("bing", **both)
-    c.check("不认识的后端名 → 报错并列出可选项",
-            name == "" and "bing" in why, why)
+    # 开关是显式意图：关掉的那个不该被选中
+    c.check("★ Tavily 关掉 + 优先 Tavily → 退到 DeepSeek（不报错）",
+            ex.pick_backend("tavily", tavily_on=False, **both)[0] == "deepseek",
+            str(ex.pick_backend("tavily", tavily_on=False, **both)))
+    c.check("★ DeepSeek 关掉 + 优先 DeepSeek → 退到 Tavily",
+            ex.pick_backend("deepseek", deepseek_on=False, **both)[0] == "tavily")
 
+    # 没 Key 等价于不可用
+    c.check("优先 Tavily 但它没 Key → 退到 DeepSeek",
+            ex.pick_backend("tavily", tavily_key="", deepseek_key="ds")[0] == "deepseek")
+    c.check("优先 DeepSeek 但它没 Key → 退到 Tavily",
+            ex.pick_backend("deepseek", tavily_key="tv", deepseek_key="")[0] == "tavily")
+
+    name, why = ex.pick_backend("tavily", tavily_key="", deepseek_key="")
+    c.check("★ 一个都没有 → 报错并说明各自缺什么",
+            name == "" and "TAVILY_API_KEY" in why and "DEEPSEEK_SEARCH_API_KEY" in why,
+            why)
+
+    name, why = ex.pick_backend("", tavily_on=False, deepseek_on=False, **both)
+    c.check("★ 两个都关着 → 报错并指出去哪个设置页打开",
+            name == "" and "设置" in why and "联网搜索" in why, why)
+
+    name, why = ex.pick_backend("", tavily_on=False, tavily_key="tv", **{"deepseek_key": ""})
+    c.check("只关着且没 Key → 报错（不会挑一个关着的）", name == "", why)
+
+    c.check("不认识的值 → 按优先 Tavily 处理（不崩、不静默）",
+            ex.pick_backend("bing", **both)[0] == "tavily")
     c.check("大小写与空白被归一",
             ex.pick_backend("  TAVILY  ", **both)[0] == "tavily")
 
@@ -185,7 +193,9 @@ def section_dispatch(c: Checker) -> None:
     c.section("第 4 节：web_search 的分派（两个后端各走各的）")
 
     real = (AppConfig.WEB_SEARCH_BACKEND, AppConfig.TAVILY_API_KEY,
-            AppConfig.DEEPSEEK_API_KEY, ex._search_tavily, ex._search_deepseek)
+            AppConfig.DEEPSEEK_API_KEY, ex._search_tavily, ex._search_deepseek,
+            getattr(AppConfig, "WEB_SEARCH_TAVILY_ON", True),
+            getattr(AppConfig, "WEB_SEARCH_DEEPSEEK_ON", True))
     calls: list[str] = []
 
     def _fake_tavily(q):                                       # noqa: ANN001
@@ -212,9 +222,19 @@ def section_dispatch(c: Checker) -> None:
         AppConfig.WEB_SEARCH_BACKEND = "tavily"
         AppConfig.TAVILY_API_KEY = ""
         calls.clear()
+        c.check("★ 优先 Tavily 但没 Key、DeepSeek 可用 → 走 DeepSeek（开关语义）",
+                ex.web_search({"query": "q"}) == "DEEPSEEK_RESULT", str(calls))
+
+        # 两个开关都关掉 → 必须报错，且不调用任何后端
+        AppConfig.TAVILY_API_KEY = "tv"
+        AppConfig.WEB_SEARCH_TAVILY_ON = False
+        AppConfig.WEB_SEARCH_DEEPSEEK_ON = False
+        calls.clear()
         out = ex.web_search({"query": "q"})
-        c.check("★ 指定 tavily 但没 Key → 报错，且**没有调用任何后端**",
+        c.check("★ 两个都关着 → 报错，且没有调用任何后端",
                 "错误" in out and not calls, f"{out} / {calls}")
+        AppConfig.WEB_SEARCH_TAVILY_ON = True
+        AppConfig.WEB_SEARCH_DEEPSEEK_ON = True
 
         AppConfig.WEB_SEARCH_BACKEND = "auto"
         AppConfig.TAVILY_API_KEY = ""
@@ -231,7 +251,8 @@ def section_dispatch(c: Checker) -> None:
                 "错误" in ex.web_search({"query": "   "}), "")
     finally:
         (AppConfig.WEB_SEARCH_BACKEND, AppConfig.TAVILY_API_KEY,
-         AppConfig.DEEPSEEK_API_KEY, ex._search_tavily, ex._search_deepseek) = real
+         AppConfig.DEEPSEEK_API_KEY, ex._search_tavily, ex._search_deepseek,
+         AppConfig.WEB_SEARCH_TAVILY_ON, AppConfig.WEB_SEARCH_DEEPSEEK_ON) = real
 
 
 def section_tavily_unchanged(c: Checker) -> None:

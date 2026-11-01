@@ -235,7 +235,15 @@ class AppConfig:
     #
     # ★ DeepSeek Search 见 https://api-docs.deepseek.com/zh-cn/guides/search/
     #   计费按「成功请求次数」：1,000 次 5 元；失败/无结果不计费。
-    WEB_SEARCH_BACKEND: str = os.getenv("WEB_SEARCH_BACKEND", "auto").strip().lower()
+    WEB_SEARCH_BACKEND: str = os.getenv("WEB_SEARCH_BACKEND", "tavily").strip().lower()
+    # ★ 两个搜索服务各自的开关键。默认都开 —— 有 Key 才会真正被选中，
+    #   所以"都开"在没配 Key 的情况下不会产生任何效果，也不会报错。
+    WEB_SEARCH_TAVILY_ON: bool = os.getenv(
+        "WEB_SEARCH_TAVILY_ON", "1").strip().lower() not in ("0", "false", "no", "off")
+    WEB_SEARCH_DEEPSEEK_ON: bool = os.getenv(
+        "WEB_SEARCH_DEEPSEEK_ON", "1").strip().lower() not in ("0", "false", "no", "off")
+    # ★ DeepSeek 搜索可以单独配一把 Key（留空 = 沿用 DEEPSEEK_API_KEY）
+    DEEPSEEK_SEARCH_API_KEY: str = os.getenv("DEEPSEEK_SEARCH_API_KEY", "")
     DEEPSEEK_SEARCH_URL: str = os.getenv(
         "DEEPSEEK_SEARCH_URL", "https://api.deepseek.com/v1/tools/search").strip()
 
@@ -300,6 +308,7 @@ _RUNTIME_KEYS = (
     "AMAP_API_KEY", "TAVILY_API_KEY",
     # ★ 联网搜索后端（auto/tavily/deepseek）：在「设置 → 其他 API」里改完即生效
     "WEB_SEARCH_BACKEND", "DEEPSEEK_SEARCH_URL",
+    "WEB_SEARCH_TAVILY_ON", "WEB_SEARCH_DEEPSEEK_ON", "DEEPSEEK_SEARCH_API_KEY",
     "EMBEDDING_API_KEY", "EMBEDDING_BASE_URL", "EMBEDDING_MODEL",
     # ★ 切换默认 Embedding 服务商（热更新）：在「设置 → Embedding」里改完立刻生效
     "EMBEDDING_PROVIDER",

@@ -112,30 +112,48 @@ def get_weather(args: dict) -> str:
 BACKENDS: tuple[str, ...] = ("auto", "tavily", "deepseek")
 
 
-def pick_backend(want: str = "", *, tavily_key: str = "",
-                 deepseek_key: str = "") -> tuple[str, str]:
+def pick_backend(want: str = "", *, tavily_key: str = "", deepseek_key: str = "",
+                 tavily_on: bool = True,
+                 deepseek_on: bool = True) -> tuple[str, str]:
     """决定这次用哪个后端。返回 `(后端名, 不可用原因)`；可用时原因是空串。
 
-    ★ 纯函数，便于守卫直接测；也便于把"哪个 Key 有值"与"配置说什么"分开验证。
+    ★ 纯函数，便于守卫直接测；也便于把"开关"与"Key"分开验证。
 
-    `auto` 的口径：**优先 Tavily**。这样升级后默认行为与升级前逐字一致 ——
-      否则同一句查询会突然换一家搜索引擎、结果排序也变了，而没人会想到是这个原因。
+    【口径】`want` 现在表示**优先级**，不再是"强制"：
+      · 能用的后端 = 开关打开 **且** 有 Key；
+      · 优先用 `want`；它不可用就退到另一个（并记一条 info）；
+      · 一个都没有 → 返回原因（界面上要能照着这句话去改）。
+
+    ★ 为什么不再"强制"：开关本身就是显式的意图表达。既然用户能把 Tavily 关掉，
+      那么"优先 Tavily"在他关掉 Tavily 之后就应当自然退到 DeepSeek ——
+      而不是报一句"指定了 Tavily 却没有 Key"，让他去猜该改哪里。
     """
-    choice = str(want or "auto").strip().lower()
-    if choice not in BACKENDS:
-        return "", f"配置里的搜索后端 {choice!r} 不认识（可用：{list(BACKENDS)}）"
-    if choice == "tavily":
-        return ("tavily", "") if tavily_key else (
-            "", "配置指定用 Tavily，但没有配置 TAVILY_API_KEY")
-    if choice == "deepseek":
-        return ("deepseek", "") if deepseek_key else (
-            "", "配置指定用 DeepSeek Search，但没有配置 DEEPSEEK_API_KEY")
-    # auto
-    if tavily_key:
-        return "tavily", ""
-    if deepseek_key:
-        return "deepseek", ""
-    return "", "Tavily 与 DeepSeek 的 Key 都没有配置"
+    want = str(want or "").strip().lower()
+    if want not in ("", "auto", "tavily", "deepseek"):
+        # .env 可能被手改坏。**不静默认账**：记一条警告，再按"优先 Tavily"走，
+        # 免得一个拼写错误让联网搜索整个不可用。
+        log.warning("WEB_SEARCH_BACKEND=%r 不认识（可用：tavily / deepseek），"
+                    "按「优先 Tavily」处理", want)
+    order = "deepseek" if want == "deepseek" else "tavily"
+
+    avail: list[str] = []
+    if tavily_on and tavily_key:
+        avail.append("tavily")
+    if deepseek_on and deepseek_key:
+        avail.append("deepseek")
+
+    if not avail:
+        if not tavily_on and not deepseek_on:
+            return "", ("两个搜索服务都关着 —— 在「设置 → 其他 API → 联网搜索」里"
+                        "打开一个")
+        return "", ("开着的搜索服务都没有密钥：Tavily 需要 TAVILY_API_KEY，"
+                    "DeepSeek 搜索需要 DEEPSEEK_SEARCH_API_KEY"
+                    "（留空则沿用 DEEPSEEK_API_KEY）")
+    if order in avail:
+        return order, ""
+    other = avail[0]
+    log.info("搜索后端：优先的 %s 不可用（关闭或没密钥），改用 %s", order, other)
+    return other, ""
 
 
 def web_search(args: dict) -> str:
@@ -149,10 +167,14 @@ def web_search(args: dict) -> str:
     if not query:
         return "错误：搜索词为空"
 
+    deepseek_key = (AppConfig.DEEPSEEK_SEARCH_API_KEY
+                    or AppConfig.DEEPSEEK_API_KEY)
     backend, why = pick_backend(
         AppConfig.WEB_SEARCH_BACKEND,
         tavily_key=AppConfig.TAVILY_API_KEY,
-        deepseek_key=AppConfig.DEEPSEEK_API_KEY,
+        deepseek_key=deepseek_key,
+        tavily_on=bool(getattr(AppConfig, "WEB_SEARCH_TAVILY_ON", True)),
+        deepseek_on=bool(getattr(AppConfig, "WEB_SEARCH_DEEPSEEK_ON", True)),
     )
     if not backend:
         return f"错误：{why}"
@@ -215,7 +237,8 @@ def _search_deepseek(query: str) -> str:
     try:
         resp = requests.post(
             AppConfig.DEEPSEEK_SEARCH_URL,
-            headers={"Authorization": f"Bearer {AppConfig.DEEPSEEK_API_KEY}",
+            headers={"Authorization": "Bearer " + (
+                AppConfig.DEEPSEEK_SEARCH_API_KEY or AppConfig.DEEPSEEK_API_KEY),
                      "Content-Type": "application/json"},
             json={"query": query, "count": 3, "need_content": False},
             timeout=20,

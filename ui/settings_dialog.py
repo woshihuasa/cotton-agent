@@ -44,8 +44,40 @@ from PyQt6.QtWidgets import (
 )
 
 from core.config_manager import ConfigManager
+from ui.toggle import ToggleSwitch
 
 # ── 样式 ───────────────────────────────────────────
+
+_SEARCH_CARD_QSS = """
+QFrame#searchCard {
+    background: #FFFFFF;
+    border: 1px solid #E3E5E8;
+    border-radius: 8px;
+}
+QLabel#searchCardTitle {
+    font-size: 13px;
+    color: #1f2328;
+    background: transparent;
+}
+QLabel#searchCardState {
+    font-size: 11px;
+    background: transparent;
+    padding-left: 6px;
+}
+QFrame#searchCard QLineEdit {
+    background: #FBFBFC;
+    border: 1px solid #E3E5E8;
+    border-radius: 6px;
+    padding: 5px 8px;
+    font-size: 12px;
+}
+QFrame#searchCard QLabel#formLabel {
+    color: #8a919b;
+    font-size: 11px;
+    background: transparent;
+}
+"""
+
 
 def _search_combo_qss() -> str:
     """「联网搜索后端」下拉的样式。
@@ -492,24 +524,56 @@ class SettingsDialog(QDialog):
         self._amap_key.setPlaceholderText("高德地图 Web API Key")
         other_form.addRow(self._label("高德地图 Key:"), self._amap_key)
 
+
+        # ── 联网搜索 ──
+        # ★ 结构：**每个搜索服务一张卡片**（自己的密钥 + 自己的开关），
+        #   下面才是"优先用哪个"。之前只有一行"后端选择"，选 DeepSeek 却依赖
+        #   「模型」页里恰好配了 DeepSeek Key —— 那是隐式依赖，选完等于没选。
+        self._search_dots: dict[str, QLabel] = {}
+        search_group = QGroupBox("联网搜索")
+        search_layout = QVBoxLayout(search_group)
+        search_layout.setSpacing(8)
+
+        search_hint = QLabel("这两种搜索各自独立配置，可只开一个，也可都开。")
+        search_hint.setObjectName("formLabel")
+        search_hint.setWordWrap(True)
+        search_layout.addWidget(search_hint)
+
+        # Tavily
+        self._tavily_on = ToggleSwitch()
         self._tavily_key = PasswordLineEdit()
         self._tavily_key.setPlaceholderText("tvly-...")
-        other_form.addRow(self._label("Tavily Search Key:"), self._tavily_key)
+        search_layout.addWidget(self._search_card(
+            "Tavily", self._tavily_on, self._tavily_key,
+            "按次计费；需填写 Tavily 的 API Key。"))
 
-        # ★ 联网搜索的后端（`core/tools/external.pick_backend()` 读它）。
-        #   以前只能改 .env，界面上没有入口 —— 等于"做了但用不上"。
+        # DeepSeek 搜索
+        self._deepseek_on = ToggleSwitch()
+        self._ds_search_key = PasswordLineEdit()
+        self._ds_search_key.setPlaceholderText("留空 = 沿用「模型」里的 DeepSeek Key")
+        search_layout.addWidget(self._search_card(
+            "DeepSeek 搜索", self._deepseek_on, self._ds_search_key,
+            "走 DeepSeek 官方 /tools/search；密钥可与模型共用，也可单独填。"))
+
+        # 优先级（只决定"两个都开着时先用谁"）
+        prio_row = QHBoxLayout()
+        prio_row.addWidget(self._label("优先使用:"))
         self._search_backend = QComboBox()
         self._search_backend.setObjectName("searchBackend")
         self._search_backend.setStyleSheet(_search_combo_qss())
-        for _label, _value in (("自动（优先 Tavily）", "auto"),
-                               ("Tavily", "tavily"),
+        for _label, _value in (("Tavily", "tavily"),
                                ("DeepSeek 搜索", "deepseek")):
             self._search_backend.addItem(_label, _value)
         self._search_backend.setToolTip(
-            "「自动」= 配了 Tavily Key 就用 Tavily，没配才用 DeepSeek 搜索。\n"
-            "DeepSeek 搜索需要已配置 DeepSeek Key（见「模型」分组），"
-            "按成功请求计费。")
-        other_form.addRow(self._label("联网搜索后端:"), self._search_backend)
+            "两个都开着时先用谁。只开一个时，用哪个与这里无关。")
+        prio_row.addWidget(self._search_backend, 1)
+        search_layout.addLayout(prio_row)
+
+        # ★ 保存时顺手刷新两张卡片的状态点
+        for _w in (self._tavily_key, self._ds_search_key):
+            _w.textChanged.connect(self._refresh_search_state)
+        for _t in (self._tavily_on, self._deepseek_on):
+            _t.toggled.connect(self._refresh_search_state)
 
         # ── Web 服务 ──
         web_group = QGroupBox("Web 服务（浏览器访问）")
@@ -569,7 +633,7 @@ class SettingsDialog(QDialog):
         pages = [
             ("模型", self._make_page(prov_group)),
             ("Embedding", self._make_page(emb_group)),
-            ("其他 API", self._make_page(other_group)),
+            ("其他 API", self._make_page(other_group, search_group)),
             ("Web 服务", self._make_page(web_group)),
         ]
         if self._schedule_panel is not None:
@@ -625,6 +689,64 @@ class SettingsDialog(QDialog):
         lbl.setFixedWidth(100)
         return lbl
 
+    # ── 联网搜索卡片 ─────────────────────────────
+
+    def _search_card(self, title: str, toggle: ToggleSwitch,
+                     key_edit: QWidget, note: str) -> QFrame:
+        """一张搜索服务卡片：`标题 + 状态点 + 开关`，下面一行密钥与一句说明。"""
+        card = QFrame()
+        card.setObjectName("searchCard")
+        card.setStyleSheet(_SEARCH_CARD_QSS)
+        col = QVBoxLayout(card)
+        col.setContentsMargins(14, 12, 14, 12)
+        col.setSpacing(8)
+
+        head = QHBoxLayout()
+        name = QLabel(title)
+        name.setObjectName("searchCardTitle")
+        head.addWidget(name)
+        dot = QLabel()
+        dot.setObjectName("searchCardState")
+        self._search_dots[title] = dot
+        head.addWidget(dot)
+        head.addStretch(1)
+        head.addWidget(toggle)
+        col.addLayout(head)
+
+        key_edit.setEnabled(toggle.isChecked())
+        toggle.toggled.connect(key_edit.setEnabled)
+        col.addWidget(key_edit)
+
+        note_label = QLabel(note)
+        note_label.setObjectName("formLabel")
+        note_label.setWordWrap(True)
+        col.addWidget(note_label)
+        return card
+
+    def _refresh_search_state(self) -> None:
+        """状态点跟着"开关 + 密钥"走：关=灰、开且有 key=绿、开但没 key=红。"""
+        from core import credentials
+        ds_shared = credentials.has_key("deepseek")
+        rows = (
+            ("Tavily", self._tavily_on, self._tavily_key.text().strip(), False),
+            ("DeepSeek 搜索", self._deepseek_on,
+             self._ds_search_key.text().strip(), ds_shared),
+        )
+        for title, toggle, key, fallback in rows:
+            dot = self._search_dots.get(title)
+            if dot is None:
+                continue
+            if not toggle.isChecked():
+                color, text = "#C2C2C7", "已关闭"
+            elif key:
+                color, text = "#22A06B", "已配置"
+            elif fallback:
+                color, text = "#22A06B", "沿用 DeepSeek Key"
+            else:
+                color, text = "#E5484D", "未配置密钥"
+            dot.setText(f'<span style="color:{color}">●</span> {text}')
+            dot.setStyleSheet("font-size:11px;")
+
     def _load_values(self) -> None:
         data = ConfigManager.load()
         # ⚠️ 这里**不再**加载 DEEPSEEK_* —— 那三个键仍留在 .env 里（作为
@@ -635,10 +757,17 @@ class SettingsDialog(QDialog):
         # （服务商 + 凭据层 + 三个键里只剩"选谁"由 `EMBEDDING_PROVIDER` 表达）。
         self._amap_key.setText(data.get("AMAP_API_KEY", ""))
         self._tavily_key.setText(data.get("TAVILY_API_KEY", ""))
-        _backend = str(data.get("WEB_SEARCH_BACKEND", "") or "auto").strip().lower()
-        _idx = self._search_backend.findData(_backend if _backend in
-                                             ("auto", "tavily", "deepseek") else "auto")
-        self._search_backend.setCurrentIndex(max(0, _idx))
+        self._tavily_on.setChecked(
+            str(data.get("WEB_SEARCH_TAVILY_ON", "1")).strip() not in ("0", "false", "False"))
+        self._deepseek_on.setChecked(
+            str(data.get("WEB_SEARCH_DEEPSEEK_ON", "1")).strip() not in ("0", "false", "False"))
+        self._ds_search_key.setText(data.get("DEEPSEEK_SEARCH_API_KEY", ""))
+        _backend = str(data.get("WEB_SEARCH_BACKEND", "") or "tavily").strip().lower()
+        if _backend == "auto":          # 旧值：语义等价于"优先 Tavily"
+            _backend = "tavily"
+        self._search_backend.setCurrentIndex(
+            max(0, self._search_backend.findData(_backend)))
+        self._refresh_search_state()
 
     # ── Web 服务 ──────────────────────────────────
 
@@ -729,7 +858,10 @@ class SettingsDialog(QDialog):
         ConfigManager.save({
             "AMAP_API_KEY": self._amap_key.text().strip(),
             "TAVILY_API_KEY": self._tavily_key.text().strip(),
-            # 联网搜索后端（auto/tavily/deepseek）；热更新，保存后即生效
-            "WEB_SEARCH_BACKEND": str(self._search_backend.currentData() or "auto"),
+            # 联网搜索：两个服务各自的开关与密钥，加"优先用谁"（都是热更新键）
+            "WEB_SEARCH_BACKEND": str(self._search_backend.currentData() or "tavily"),
+            "WEB_SEARCH_TAVILY_ON": "1" if self._tavily_on.isChecked() else "0",
+            "WEB_SEARCH_DEEPSEEK_ON": "1" if self._deepseek_on.isChecked() else "0",
+            "DEEPSEEK_SEARCH_API_KEY": self._ds_search_key.text().strip(),
         })
         self.accept()
