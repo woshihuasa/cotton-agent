@@ -46,6 +46,23 @@ from core import alarms
 
 log = logging.getLogger("Schedule")
 
+#: **出厂节奏的版本号**。默认任务的 `trigger` 一改就要 +1。
+#:
+#: ★ 为什么需要它：`load()` 的策略是"已有的以用户为准"，所以**出厂节奏的变化
+#:   永远传不到老用户那里** —— 改了 `weather_watch` 的检查时刻，老机器上还是
+#:   旧间隔。版本号让"节奏"这一项可以单独迁移，而开关/城市/静默期仍然归用户。
+DEFAULTS_VERSION = 2
+
+#: **历史上出现过的出厂节奏**。迁移时只替换"看起来没被改过"的（正好等于某个历史值），
+#: 手改过的一律不动 —— 用户把检查间隔改成 45 分钟，不该被一次升级抹掉。
+#: 用**纯数据**描述（此处 `Trigger` 类还没定义，不能直接构造）。
+_LEGACY_TRIGGERS: dict[str, tuple[dict, ...]] = {
+    "daily_brief": ({"kind": "interval", "every_min": 60},),
+    "weather_watch": ({"kind": "interval", "every_min": 180},
+                      {"kind": "interval", "every_min": 240}),
+}
+
+
 #: `run_now` 的哨兵：**没有可跑的东西，但已经处理过了**（例如无生效预警）。
 #: ★ 不能用空串 —— 空串表示"没启动起来"，`_run_now_worker` 会据此发失败事件。
 NO_ALERT_SENTINEL = "no-alert"
@@ -794,8 +811,12 @@ class Scheduler:
                     jobs.append(job)
 
             added = self._merge_new_defaults(jobs)
-            if added:
-                log.info("出厂任务已补进现有配置：%s", added)
+            migrated = self._migrate_triggers(jobs, raw)
+            if added or migrated:
+                if added:
+                    log.info("出厂任务已补进现有配置：%s", added)
+                if migrated:
+                    log.info("出厂节奏已更新到 v%d：%s", DEFAULTS_VERSION, migrated)
                 self._save_config_list(jobs)
         else:
             jobs = default_jobs()
@@ -804,6 +825,39 @@ class Scheduler:
         self.jobs = jobs
         self._state = self._read_state()
         self._loaded = True
+
+    @staticmethod
+    def _migrate_triggers(jobs: list[Job], raw: dict) -> list[str]:
+        """把出厂节奏的变化同步到老配置里。返回被改动的任务 id。
+
+        ★ 只动 `trigger`，**不动**开关、城市、静默期、规则 —— 那些是用户的选择。
+          节奏则更像是"产品口径"：用户没法在界面上改它（推送页没有这个入口），
+          所以它变了就该生效，否则"说好的 6 小时一次"永远只是代码里的话。
+        """
+        try:
+            stored = int((raw or {}).get("defaults_version") or 1)
+        except (TypeError, ValueError):
+            stored = 1
+        if stored >= DEFAULTS_VERSION:
+            return []
+        by_id = {j.id: j for j in jobs}
+        changed: list[str] = []
+        for default in default_jobs():
+            job = by_id.get(default.id)
+            if job is None:
+                continue                      # 缺失的由 _merge_new_defaults 负责
+            if job.trigger == default.trigger:
+                continue                      # 已经是新节奏
+            legacy = [(d.get("kind"), int(d.get("every_min") or 0))
+                      for d in _LEGACY_TRIGGERS.get(job.id, ())]
+            if (job.trigger.kind, int(job.trigger.every_min)) not in legacy:
+                # 手改过的（既不是新默认、也不是任何历史值）→ 尊重用户，不动
+                log.info("%s 的节奏与出厂值不同（%s），按用户设置保留",
+                         job.id, job.trigger)
+                continue
+            job.trigger = replace(default.trigger)
+            changed.append(job.id)
+        return changed
 
     @staticmethod
     def _merge_new_defaults(jobs: list[Job]) -> list[str]:
@@ -828,7 +882,8 @@ class Scheduler:
         """把给定任务表写回配置文件（写不出去只记日志）。"""
         try:
             _atomic_write_json(self.config_file,
-                               {"jobs": [j.to_dict() for j in jobs]})
+                               {"defaults_version": DEFAULTS_VERSION,
+                                "jobs": [j.to_dict() for j in jobs]})
         except OSError as e:
             log.warning("调度配置写不出去（%s），仅本次内存生效", e)
 

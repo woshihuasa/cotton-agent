@@ -490,6 +490,70 @@ def section_config(c: Checker) -> None:
             len(sched6.jobs) == 3, str([j.id for j in sched6.jobs]))
 
 
+    # ------------------------------------------------------------------
+    # ★ 出厂**节奏**变了要能传到老配置（只动 trigger，不动用户的选择）
+    #
+    # 背景：`load()` 的策略是"已有的以用户为准"，于是改了 weather_watch 的检查时刻，
+    # 老机器上还是旧的 interval 180 —— "说好的 6 小时一次"永远只是代码里的话。
+    # ------------------------------------------------------------------
+    _isolate()
+    legacy = {"jobs": [
+        {"id": "daily_brief", "workflow": "daily_brief.yaml", "kind": "workflow",
+         "enabled": False, "trigger": {"kind": "interval", "every_min": 60},
+         "inputs": {"city": "阿拉尔", "region": "阿拉尔市"},
+         "notice": {"node": "brief", "field": "body"}},
+        {"id": "weather_watch", "workflow": "weather_alert.yaml",
+         "kind": "weather_watch", "enabled": True,
+         "trigger": {"kind": "interval", "every_min": 180},
+         "inputs": {"city": "阿拉尔"}, "repeat_min": 720,
+         "notice": {"node": "advice", "field": "body"}},
+    ]}
+    mig_path = S.schedule_dir() / "schedule.json"
+    mig_path.write_text(json.dumps(legacy, ensure_ascii=False), encoding="utf-8")
+
+    sched_mig = S.Scheduler(fetcher=lambda city, when: "")
+    sched_mig.load()
+    by_mig = {j.id: j for j in sched_mig.jobs}
+    c.check("★ 老配置的 weather_watch 升级成 06/12/18/00",
+            by_mig["weather_watch"].trigger.times
+            == ("06:00", "12:00", "18:00", "00:00"),
+            str(by_mig["weather_watch"].trigger))
+    c.check("★ daily_brief 从 interval 60 升成 daily 08:00",
+            by_mig["daily_brief"].trigger.kind == "daily"
+            and by_mig["daily_brief"].trigger.at == "08:00",
+            str(by_mig["daily_brief"].trigger))
+    c.check("★ 迁移**不动用户的选择**（停用状态与城市保持不变）",
+            by_mig["daily_brief"].enabled is False
+            and by_mig["daily_brief"].inputs.get("city") == "阿拉尔",
+            f"{by_mig['daily_brief'].enabled} / {by_mig['daily_brief'].inputs}")
+    c.check("迁移后写回版本号",
+            json.loads(mig_path.read_text(encoding="utf-8")).get("defaults_version")
+            == S.DEFAULTS_VERSION, "")
+
+    sched_mig2 = S.Scheduler(fetcher=lambda city, when: "")
+    sched_mig2.load()
+    c.check("反向：二次加载不重复迁移（版本号已是最新）",
+            [j.trigger.times for j in sched_mig2.jobs if j.id == "weather_watch"]
+            == [("06:00", "12:00", "18:00", "00:00")], "")
+
+    # ★ 手改过的节奏（既不是新默认、也不是任何历史值）→ 不许被升级抹掉
+    _isolate()
+    custom = {"jobs": [
+        {"id": "weather_watch", "workflow": "weather_alert.yaml",
+         "kind": "weather_watch", "enabled": True,
+         "trigger": {"kind": "interval", "every_min": 45},
+         "inputs": {"city": "阿拉尔"}, "repeat_min": 720,
+         "notice": {"node": "advice", "field": "body"}},
+    ]}
+    (S.schedule_dir() / "schedule.json").write_text(
+        json.dumps(custom, ensure_ascii=False), encoding="utf-8")
+    sched_c = S.Scheduler(fetcher=lambda city, when: "")
+    sched_c.load()
+    c.check("★ 用户手改的节奏（45 分钟）在升级后**保持不变**",
+            sched_c.job("weather_watch").trigger.every_min == 45,
+            str(sched_c.job("weather_watch").trigger))
+
+
 def section_fire_once(c: Checker) -> None:
     c.section("第 4 节：★ 一个计划时刻只触发一次（重启也不重复）")
 
