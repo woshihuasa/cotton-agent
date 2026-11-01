@@ -42,7 +42,7 @@ from datetime import datetime, time as dtime, timedelta
 from pathlib import Path
 from typing import Any, Callable
 
-from core import alarms
+from core import alarms, weather
 
 log = logging.getLogger("Schedule")
 
@@ -356,8 +356,8 @@ _FIELD_LABEL: dict[str, str] = {
 }
 
 
-def compose_alert_text(preamble: str, advice: str) -> str:
-    """预警推送正文 = 一句客观事实 + 「农事建议：」 + 模型建议。
+def compose_notice_text(preamble: str, advice: str) -> str:
+    """推送正文 = 客观块 + 「农事建议：」 + 模型建议（预警与简报共用）。
 
     ★ **不放原文链接**：农户要的是"现在该做什么"，一条带 URL 的尾巴只会让消息
       显得像剪报。原文链接仍然记在档案里（`_archive(..., source_url=...)`），
@@ -427,6 +427,9 @@ class Job:
     #: 因为猜错的表现是"推送了一段 JSON 原文"，很难与"模型答得差"区分。
     notice_node: str = ""
     notice_field: str = "body"
+    #: >0 时由触发层**预取**未来 N 天天气，作为工作流输入 `weather_text` 传入，
+    #: 并把同样几行作为推送的"客观块"前置。农情简报 = 3。
+    weather_days: int = 0
 
     def validate(self) -> str:
         """空串表示合法。不合法的一律**不执行**（配置错了不该跑出半截结果）。"""
@@ -479,7 +482,16 @@ class Job:
                 for r in self.rules
             ],
             "notice": {"node": self.notice_node, "field": self.notice_field},
+            "weather_days": int(self.weather_days),
         }
+
+
+def _safe_int(raw: Any, default: int = 0) -> int:
+    """配置里的整数：坏值退回默认值，不抛。"""
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return default
 
 
 def _parse_times(raw: Any) -> tuple[str, ...]:
@@ -565,6 +577,7 @@ def _job_from_dict(raw: Any) -> Job | None:
         repeat_min=repeat,
         rules=rules,
         notice_node=str(notice.get("node") or "").strip(),
+        weather_days=_safe_int(raw.get("weather_days")),
         notice_field=str(notice.get("field") or "body").strip(),
     )
 
@@ -585,6 +598,8 @@ def default_jobs() -> list[Job]:
             enabled=True,
             # 正式口径：每天清晨一次（08:00）。
             trigger=Trigger(kind="daily", at="08:00"),
+            # 预取今日+明日+后天：简报里三天各一行（客观块由触发层拼）。
+            weather_days=3,
             inputs={"city": DEFAULT_CITY, "region": DEFAULT_REGION},
             grace_min=DEFAULT_GRACE_MIN,
             notice_node="brief",
@@ -997,6 +1012,23 @@ class Scheduler:
         self.save_state()
         return fired
 
+    def _prepare_weather(self, job: Job) -> tuple[str, str]:
+        """按 `weather_days` 预取多日天气。返回 `(紧凑行文本, 错误说明)`。
+
+        ★ 为什么由触发层取、再作为输入交给工作流，而不是工作流里自己调工具：
+          这几行**同时**是给用户看的客观块和给模型的依据。若在工作流内取，
+          触发层就拿不到它、拼不出客观块，推送又只剩模型正文。
+          与预警那条链路同一套做法（触发层给事实，模型只写建议）。
+        """
+        days = int(getattr(job, "weather_days", 0) or 0)
+        if days <= 0:
+            return "", ""
+        city = str(job.inputs.get("city") or "")
+        lines, why = weather.daily_lines(city, days)
+        if not lines:
+            return "", why or "取不到天气预报"
+        return "\n".join(lines), ""
+
     def _tick_once(self, job: Job, now: datetime) -> str:
         """每日类任务：到点就跑，错过就记一笔。"""
         st = self.state_of(job.id)
@@ -1015,7 +1047,24 @@ class Scheduler:
 
         if job.id in self._inflight:
             return ""
-        if not self._submit(job, scheduled, extra_inputs=None):
+
+        extra: dict | None = None
+        meta: dict | None = None
+        if int(getattr(job, "weather_days", 0) or 0) > 0:
+            text, why = self._prepare_weather(job)
+            if not text:
+                # ★ 取不到天气就别生成简报：模型会凭空写一段季节管理，
+                #   而用户以为那是"今天的情况"。
+                self._record(job, st, "failed", scheduled,
+                             note=f"天气取不到：{why}", consume=False)
+                self._emit({"type": "degraded", "job": job.id,
+                            "text": f"「{job.title or job.id}」{why}，本次不生成。"})
+                return ""
+            extra = {"weather_text": text}
+            meta = {"title": job.title or job.id, "preamble": text, "url": ""}
+
+        if not self._submit(job, scheduled, extra_inputs=extra,
+                            notice_meta=meta):
             return ""
         return job.id
 
@@ -1258,6 +1307,18 @@ class Scheduler:
         if job is None or not job.ok:
             return ""
         now = datetime.now().replace(microsecond=0)
+
+        # ★ 预取多日天气（简报）：手动运行与定时触发走同一条路
+        if int(getattr(job, "weather_days", 0) or 0) > 0:
+            text_w, why = self._prepare_weather(job)
+            if not text_w:
+                self._emit({"type": "degraded", "job": job.id,
+                            "text": f"「{job.title or job.id}」{why}，本次不生成。"})
+                return ""
+            return self._submit(job, now, extra_inputs={"weather_text": text_w},
+                                notice_meta={"title": job.title or job.id,
+                                             "preamble": text_w, "url": ""})
+
         if job.kind == "weather_watch":
             # ★ 手动运行走**同一个判定**（读官方信号）。否则"我手动跑的
             #   怎么和自动推的不一样"会变成每次都要解释的事。
@@ -1388,7 +1449,7 @@ class Scheduler:
         # ★ 客观部分前置：一句事实 + 「农事建议：」+ 模型建议。
         #   链接**不进正文**，只随存档留下（`_archive` 的 source_url）。
         title = str(meta.get("title") or job.title or job.id)
-        text = compose_alert_text(str(meta.get("preamble") or ""), text)
+        text = compose_notice_text(str(meta.get("preamble") or ""), text)
         self._emit({"type": "notice", "job": job.id, "run_id": run_id,
                     "title": title, "text": text,
                     "path": str(path) if path else ""})

@@ -189,6 +189,70 @@ def section_nmc(c: Checker) -> None:
         weather.find_station = real_find
 
 
+def section_daily(c: Checker) -> None:
+    c.section("第 2 节（续）：★ 多日紧凑行（简报用的客观块）")
+
+    today = date.today()
+    # ★ 故意让 detail 从**昨天**开始：凌晨没翻页时气象台就是这样，
+    #   按数组下标贴标签会把"明天"标成"今日"。
+    y = (today - timedelta(days=1)).isoformat()
+    detail = [
+        {"date": y, "day": {"weather": {"info": "晴", "temperature": "14"},
+                            "wind": {"direct": "东风", "power": "微风"}},
+         "night": {"weather": {"info": "晴", "temperature": "2"},
+                   "wind": {"direct": "东风", "power": "微风"}},
+         "precipitation": 0.0},
+        {"date": today.isoformat(),
+         "day": {"weather": {"info": "多云", "temperature": "15"},
+                 "wind": {"direct": "东北风", "power": "微风"}},
+         "night": {"weather": {"info": "多云", "temperature": "3"},
+                   "wind": {"direct": "北风", "power": "微风"}},
+         "precipitation": 0.0},
+        {"date": (today + timedelta(days=1)).isoformat(),
+         "day": {"weather": {"info": "晴", "temperature": "16"},
+                 "wind": {"direct": "北风", "power": "微风"}},
+         "night": {"weather": {"info": "晴", "temperature": "1"},
+                   "wind": {"direct": "北风", "power": "微风"}},
+         "precipitation": 2.5},
+        {"date": (today + timedelta(days=2)).isoformat(),
+         "day": {"weather": {"info": "阴", "temperature": "12"},
+                 "wind": {"direct": "西风", "power": "3-4级"}},
+         "night": {"weather": {"info": "阴", "temperature": "0"},
+                   "wind": {"direct": "西风", "power": "3-4级"}},
+         "precipitation": 0.0},
+    ]
+    payload = {"data": {"real": {"publish_time": "2026-11-02 00:30",
+                                 "weather": {"temperature": 4.0, "humidity": 81.0},
+                                 "wind": {"direct": "东北风", "power": "微风"}},
+                        "predict": {"detail": detail}}}
+
+    real_get = weather.requests.get
+    real_find = weather.find_station
+    weather.requests.get = lambda *a, **k: _Resp(payload)
+    weather.find_station = lambda city: ({"code": "wPpQt"}, "")
+    try:
+        lines, why = weather.daily_lines("阿克苏", 3)
+    finally:
+        weather.requests.get = real_get
+        weather.find_station = real_find
+
+    c.check("★ 三天三行", why == "" and len(lines) == 3, f"{why} / {len(lines)}")
+    c.check("★ 标签按日期差算：昨天那条被丢掉、今天排第一",
+            lines[0].startswith("【今日】") and "多云" in lines[0], lines[0])
+    c.check("★ 明日/后天都标对了",
+            lines[1].startswith("【明日】") and lines[2].startswith("【后天】"),
+            str(lines[1:]))
+    c.check("★ 实况只挂在今日那一行",
+            "实况" in lines[0] and "实况" not in lines[1] and "实况" not in lines[2],
+            str(lines))
+    c.check("一天一行：温度用「夜~昼」",
+            "3~15℃" in lines[0], lines[0])
+    c.check("有降水时写毫米数、无降水写「无降水」",
+            "降水 2.5mm" in lines[1] and "无降水" in lines[0], str(lines[:2]))
+    c.check("★ 一行里不带 9999 之类的哨兵值",
+            not any("9999" in x for x in lines))
+
+
 def section_amap(c: Checker) -> None:
     c.section("第 3 节：高德兜底（地名能认、字段少）")
 
@@ -303,6 +367,7 @@ def main() -> int:
     try:
         section_index(c)
         section_nmc(c)
+        section_daily(c)
         section_amap(c)
         section_dispatch(c)
         section_tool(c)

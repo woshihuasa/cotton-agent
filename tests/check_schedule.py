@@ -205,6 +205,11 @@ def _fresh(job: S.Job | None = None, *, outputs=None, fetcher=None,
     # 每轮换一个状态文件，避免前面的用例影响后面的判定
     _isolate()
     events: list[dict] = []
+    # ★ 简报现在由触发层预取多日天气，守卫里必须打桩，否则会真发请求
+    S.weather.daily_lines = lambda city, days=3: (
+        ["【今日】多云，3~15℃，东北风微风，无降水",
+         "【明日】晴，1~16℃，北风微风，无降水",
+         "【后天】多云，0~14℃，北风微风，无降水"], "")
     runner = _Runner(outputs, launched=launched)
     sched = S.Scheduler(
         runner=runner,
@@ -554,6 +559,55 @@ def section_config(c: Checker) -> None:
             str(sched_c.job("weather_watch").trigger))
 
 
+def section_brief(c: Checker) -> None:
+    c.section("第 8 节（续）：★ 农情简报的三段式（天气由触发层前置）")
+
+    from core import weather as W
+    job = [j for j in S.default_jobs() if j.id == "daily_brief"][0]
+    c.check("出厂简报预取 3 天天气", job.weather_days == 3, str(job.weather_days))
+
+    sched, runner, events = _fresh(job, outputs={"brief": {"body": "今天适合化控。"}})
+    job0 = sched.job("daily_brief")
+    text, why = sched._prepare_weather(job0)
+    c.check("★ 客观块是三行天气", why == "" and text.count("\n") == 2, text)
+    c.check("★ 三行分别标了今日/明日/后天",
+            all(k in text for k in ("【今日】", "【明日】", "【后天】")), text)
+
+    composed = S.compose_notice_text(text, "今天适合化控。")
+    c.check("★ 正文 = 天气块 + 「农事建议：」 + 模型建议",
+            composed.startswith("【今日】") and "\n\n农事建议：\n" in composed
+            and composed.endswith("今天适合化控。"), composed[:120])
+    c.check("★ 天气块里没有模型可能改写的余地（数字来自气象台）",
+            "无降水" in composed or "降水" in composed, composed[:80])
+
+    # 天气取不到 → 不生成（否则模型凭空写季节管理）
+    real = S.weather.daily_lines
+    # ★ 必须在 `_fresh` **之后**再打桩 —— `_fresh` 自己也会装一个正常的桩
+    sched2, runner2, events2 = _fresh(job, outputs={"brief": {"body": "x"}})
+    S.weather.daily_lines = lambda city, days=3: ([], "气象台取不到")
+    try:
+        c.check("★ 天气取不到 → 不提交、不生成",
+                sched2.tick(datetime(2026, 11, 2, 8, 30)) == []
+                and runner2.submitted == [])
+        c.check("★ 并留一条 degraded 说明",
+                any(e.get("type") == "degraded" for e in events2), str(events2))
+    finally:
+        S.weather.daily_lines = real
+
+    # 工作流的契约：只剩 body
+    wf = loader.load_file(ROOT / "workflows" / "daily_brief.yaml")
+    brief = [n for n in wf.nodes if n.id == "brief"][0]
+    schema = brief.params.get("output_schema") or {}
+    c.check("★ 简报的输出契约只剩 body（title/actions 已删）",
+            set(schema) == {"body"}, str(schema))
+    c.check("★ 工作流不再自己调天气工具（天气由触发层给）",
+            all(not n.type.startswith("tool.") for n in wf.nodes),
+            str([n.type for n in wf.nodes]))
+    c.check("weather_text 是必填输入",
+            wf.inputs.get("weather_text") is not None
+            and wf.inputs["weather_text"].required, str(list(wf.inputs)))
+
+
 def section_fire_once(c: Checker) -> None:
     c.section("第 4 节：★ 一个计划时刻只触发一次（重启也不重复）")
 
@@ -901,7 +955,7 @@ def section_alarm(c: Checker) -> None:
                 meta.get("url", "").startswith("http"), str(meta.get("url")))
 
         # ★ 正文里**不许**出现链接与栏目标签
-        composed = S.compose_alert_text(meta["preamble"], "加固棚膜；风大暂停喷药。")
+        composed = S.compose_notice_text(meta["preamble"], "加固棚膜；风大暂停喷药。")
         c.check("★ 正文不含 URL（用户只要该做什么）",
                 "http" not in composed and "原文：" not in composed, composed[:60])
         c.check("★ 正文结构：事实一句 +「农事建议：」+ 建议",
@@ -1048,6 +1102,8 @@ def section_contracts(c: Checker) -> None:
                          "official_advice", "alarm_topic", "today"}
         else:
             supplied |= {"today"}
+        if int(getattr(job, "weather_days", 0) or 0) > 0:
+            supplied.add("weather_text")      # 触发层预取的多日天气
         c.check(f"★ {job.id} 提供了 {wf_name} 的全部必填输入",
                 required <= supplied, str(required - supplied))
 
@@ -1150,6 +1206,7 @@ def main() -> int:
         section_failure(c)
         section_deliver(c)
         section_alarm(c)
+        section_brief(c)
         section_contracts(c)
         section_pure(c)
     finally:

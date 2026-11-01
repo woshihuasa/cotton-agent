@@ -1,30 +1,29 @@
-# 每日农情简报 —— 由触发层在每天固定时刻拉起（`core/schedule.py`）
+# 每日农情简报 —— 每天清晨由触发层拉起（`core/schedule.py`）
 #
-# 【为什么是一条工作流，而不是一段写死的代码】
-#   它和三件事共用同一套机制：YAML 是可 review 的权威定义、节点级失败策略、
-#   断点续跑。把「每天发什么」写成流程，改口径不用改代码。
+# 【三段式，与预警同构】
+#   · 今日 / 明日 / 后天 各一行天气 —— **触发层预取**，模型碰不到、不能改；
+#   · 农事建议 —— 模型写，**可以引用**那几行的数字，但一个字都不许改。
 #
-# 【口径】只依据天气实况与知识库摘录，不由模型自由发挥 ——
-#   提示词里已写明「资料里没写的就不要写」（`prompts/daily_brief.md`）。
+# 【为什么天气由触发层取、再当输入传进来】
+#   这几行**同时**是给用户看的客观块和给模型的依据。若让工作流自己调天气工具，
+#   触发层就拿不到它、拼不出客观块，推送又会退回"只有模型正文"那种没法核对的形态。
+#   预警那条链路已经是这个做法（触发层给事实，模型只写建议），这里保持一致。
+#
+# 【为什么去掉 title / actions】
+#   `title` 从来没被用过（推送标题一直取任务名）；`actions` 也从未被渲染 ——
+#   契约里留两个没人消费的字段，只会让人以为"有这功能"。现在只剩 body。
 id: daily_brief
-version: 1
-description: 当天天气 → 知识库农事要点 → 一段能照做的田间建议
+version: 2
+description: 三天天气（触发层预取）→ 知识库农事要点 → 一段能照做的建议
 
 inputs:
-  city:   { type: string, required: true,  description: 城市名（高德口径），如 阿克苏 }
-  region: { type: string, required: true,  description: 地区名，用于检索农事要点 }
-  today:  { type: string, required: false, description: 触发日期（触发层注入） }
+  city:         { type: string, required: true,  description: 城市名（高德口径），如 阿克苏 }
+  region:       { type: string, required: true,  description: 地区名，用于检索农事要点 }
+  today:        { type: string, required: false, description: 触发日期（触发层注入） }
+  weather_text: { type: string, required: true,  description: 今日/明日/后天各一行（触发层预取） }
 
 nodes:
-  # ① 天气实况。工具返回中文文本，下游按 {{weather.text}} 引用
-  - id: weather
-    type: tool.get_weather
-    params:
-      city: "{{city}}"
-      date: today
-    side_effect: network
-
-  # ② 农事要点。只读本地向量库，所以副作用是 none
+  # ① 农事要点：只读本地向量库
   - id: tips
     type: data.kb_query
     params:
@@ -32,15 +31,13 @@ nodes:
       top_k: 4
     side_effect: none
 
-  # ③ 成文。★ 必须给 output_schema —— 下游（推送层）要靠 title/body 取文字
+  # ② 成文：**只写农事建议**。天气那几行由触发层前置，模型不重复、不改写。
   - id: brief
     type: llm.summarize
     params:
       prompt_ref: prompts/daily_brief.md
-      inputs: [weather, tips]
+      inputs: [tips]
       output_schema:
-        title: string
         body: string
-        actions: array
     side_effect: network
-    needs: [weather, tips]
+    needs: [tips]

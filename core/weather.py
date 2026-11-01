@@ -340,6 +340,134 @@ def amap_text(city: str, date_str: str = "today") -> tuple[str, str]:
         return "", f"高德数据解析错误 - {e}"
 
 
+_DAY_LABELS = ("今日", "明日", "后天", "第4天", "第5天", "第6天", "第7天")
+
+
+def _compact_line(label: str, day: dict, *, real_text: str = "") -> str:
+    """一天压成一行：`【明日】晴，4~17℃，东风微风，无降水`。
+
+    ★ 为什么要压成一行：简报里三天要占三行，分白天/夜间写就是六行，
+      抽屉里那点空间一屏放不下。判读需要的是"冷暖、风、有没有雨"。
+    """
+    def _side(name: str) -> dict:
+        return (day.get(name) or {})
+
+    night = _side("night")
+    dayp = _side("day")
+    n_info, n_temp = _valid((night.get("weather") or {}).get("info")), \
+        _valid((night.get("weather") or {}).get("temperature"))
+    d_info, d_temp = _valid((dayp.get("weather") or {}).get("info")), \
+        _valid((dayp.get("weather") or {}).get("temperature"))
+    info = d_info or n_info or "—"
+    low, high = n_temp, d_temp
+    temp = f"{low}~{high}℃" if (low and high) else (f"{high or low}℃" if (low or high) else "")
+    wind = _side("day").get("wind") or _side("night").get("wind") or {}
+    w_direct, w_power = _valid(wind.get("direct")), _valid(wind.get("power"))
+    wind_text = (w_direct + w_power) if (w_direct and w_power) else (w_direct or w_power or "")
+    precip = _valid(day.get("precipitation"))
+    try:
+        rain = "无降水" if (precip and float(precip) == 0.0) else (f"降水 {precip}mm" if precip else "")
+    except (TypeError, ValueError):
+        rain = f"降水 {precip}mm" if precip else ""
+    bits = [f"【{label}】{info}"]
+    if temp:
+        bits.append(temp)
+    if wind_text:
+        bits.append(wind_text)
+    if rain:
+        bits.append(rain)
+    line = "，".join(bits)
+    return line + (f"（{real_text}）" if real_text else "")
+
+
+def _real_brief(real: dict) -> str:
+    """实况压成半句：`实况 5.2℃，湿度 75%`。"""
+    w = (real or {}).get("weather") or {}
+    bits = []
+    if _valid(w.get("temperature")):
+        bits.append(f"实况 {w['temperature']}℃")
+    if _valid(w.get("humidity")):
+        bits.append(f"湿度 {w['humidity']}%")
+    pub = str((real or {}).get("publish_time") or "").strip()
+    if pub:
+        bits.append(f"{pub[-5:]} 更新")
+    return "，".join(bits)
+
+
+def daily_lines(city: str, days: int = 3) -> tuple[list[str], str]:
+    """未来 N 天压成 N 行（今日/明日/后天…）。返回 `(行列表, 错误说明)`。
+
+    用途：农情简报的"客观块"。★ 与 `fetch()` 分开，是因为那两个消费方要的形状不同：
+    聊天里问"明天天气"要看字段明细（键值文本），简报要的是能一眼扫过去的一行一天。
+    """
+    n = max(1, min(len(_DAY_LABELS), int(days or 1)))
+    station, why = find_station(city)
+    lines: list[str] = []
+    if station:
+        try:
+            data = requests.get(WEATHER_API, params={"stationid": station["code"]},
+                                headers=_UA, timeout=TIMEOUT_S).json().get("data") or {}
+            detail = ((data.get("predict") or {}).get("detail") or [])
+            today = date.today()
+            # ★ 标签必须按**日期差**算，不能按数组下标：凌晨没有翻页时
+            #   `detail[0]` 还是昨天，按下标会把"明天"标成"今日"。
+            for day in detail:
+                try:
+                    delta = (date.fromisoformat(str(day.get("date"))) - today).days
+                except (TypeError, ValueError):
+                    continue
+                if delta < 0:
+                    continue                      # 昨天的预报，丢掉
+                if not (0 <= delta < len(_DAY_LABELS)):
+                    continue
+                label = _DAY_LABELS[delta]
+                real_text = _real_brief(data.get("real") or {}) if delta == 0 else ""
+                line = _compact_line(label, day, real_text=real_text)
+                if line.strip(f"【{label}】 "):
+                    lines.append(line)
+                if len(lines) >= n:
+                    break
+            if lines:
+                return lines, ""
+        except Exception as e:                                # noqa: BLE001
+            log.warning("气象台多天取数失败：%s: %s", type(e).__name__, e)
+        else:
+            why = why or "气象台没有返回可用的多日预报"
+    # 退高德（4 天）
+    from config import AppConfig
+    key = getattr(AppConfig, "AMAP_API_KEY", "")
+    if key:
+        try:
+            data = requests.get(AMAP_API, timeout=10,
+                                params={"key": key, "city": city,
+                                        "extensions": "all"}).json()
+            casts = ((data.get("forecasts") or [{}])[0] or {}).get("casts") or []
+            today = date.today()
+            picked = []
+            for t in casts:
+                try:
+                    delta = (date.fromisoformat(str(t.get("date"))) - today).days
+                except (TypeError, ValueError):
+                    continue
+                if 0 <= delta < len(_DAY_LABELS):
+                    picked.append((delta, t))
+            for i, (delta, t) in enumerate(picked[:n]):
+                label = _DAY_LABELS[delta]
+                info = f"{t.get('dayweather', '')}" or "—"
+                if t.get("nightweather") and t.get("nightweather") != t.get("dayweather"):
+                    info = f"{info}转{t['nightweather']}"
+                bits = [f"【{label}】{info}",
+                        f"{t.get('nighttemp', '')}~{t.get('daytemp', '')}℃",
+                        f"{t.get('winddirection', '')}{t.get('daypower', '')}级"]
+                lines.append("，".join(x for x in bits if x and not x.startswith("~")))
+            if lines:
+                return lines, ""
+        except Exception as e:                                # noqa: BLE001
+            log.warning("高德多天取数失败：%s: %s", type(e).__name__, e)
+        return [], f"两个源都没取到多日预报（高德：{why or '无数据'}）"
+    return [], f"取不到多日预报（nmc：{why}；高德未配置 Key）"
+
+
 def fetch(city: str, date_str: str = "today", *,
           source: str = "") -> tuple[str, str]:
     """按 `WEATHER_SOURCE` 取天气。返回 `(文本, 错误说明)`。"""
@@ -364,4 +492,4 @@ def fetch(city: str, date_str: str = "today", *,
 
 
 __all__ = ["INDEX_TTL_S", "amap_text", "build_index", "clear_index",
-           "find_station", "fetch", "index_path", "nmc_text"]
+           "daily_lines", "fetch", "find_station", "index_path", "nmc_text"]
