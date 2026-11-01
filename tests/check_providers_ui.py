@@ -41,6 +41,7 @@ from ui.provider_editor import (                                 # noqa: E402
     ProviderGroup,
 )
 from ui.settings_dialog import SettingsDialog                    # noqa: E402
+from ui.toggle import ToggleSwitch                              # noqa: E402
 
 _APP = QApplication.instance() or QApplication([])
 
@@ -627,6 +628,17 @@ def main() -> int:
             for i in range(s._search_backend.count())]
     c.check("★ 优先级只有两项：Tavily / DeepSeek 搜索",
             [v for _l, v in opts] == ["tavily", "deepseek"], str(opts))
+
+    # ★ 真实踩过的坑：删掉卡片说明文字时，顺手把 `_search_card` 的 `note`
+    #   参数一起删了 → 调用方少传一个 → 构造 SettingsDialog 直接 TypeError，
+    #   表现是"设置窗口打不开"。这里直接按**三个参数**调用一次，钉住这个契约。
+    try:
+        _card = s._search_card("Tavily", ToggleSwitch(), QLineEdit())
+        _ok_card = _card is not None and _card.objectName() == "searchCard"
+    except Exception as e:                                   # noqa: BLE001
+        _ok_card = False
+        print(f"        ({type(e).__name__}: {e})")
+    c.check("★ 说明文字可省略（`_search_card` 只需 3 个参数）", _ok_card)
 
     # ★ 本次踩过的坑：键不在 MANAGED_KEYS 里 → save() 写进 .env 了，
     #   load() 却读不回来 → 界面重开显示默认值，看着像"没保存成功"。

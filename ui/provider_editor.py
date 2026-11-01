@@ -544,7 +544,7 @@ class ProviderEditDialog(QDialog):
             self._start_model_fetch(name=name)
         else:
             self._test_msg.setText(
-                "✗ 先填接口地址与API 密钥（或先保存一次），才能拉到模型清单")
+                "✗ 先配置接口地址与API 密钥，才能拉到模型清单")
             self._test_msg.setStyleSheet(f"font-size:11px; color:{COLOR_OFF};")
 
     def _start_model_fetch(self, *, name: str = "", url: str = "",

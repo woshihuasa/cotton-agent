@@ -96,13 +96,6 @@ class SchedulePanel(QWidget):
         form.addRow("地区", self._region)
         root.addLayout(form)
 
-        hint = QLabel("城市用高德口径（如 阿克苏）；地区用于检索农事要点（如 阿克苏地区）。"
-                      "这一页的改动**即时生效**、没有「保存」这一步——"
-                      "底部的按钮只负责关窗，按「取消」不会撤销已经改过的开关。")
-        hint.setObjectName("schedHint")
-        hint.setWordWrap(True)
-        root.addWidget(hint)
-
         section2 = QLabel("任务")
         section2.setObjectName("schedSection")
         root.addWidget(section2)

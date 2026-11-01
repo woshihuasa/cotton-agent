@@ -534,26 +534,21 @@ class SettingsDialog(QDialog):
         search_layout = QVBoxLayout(search_group)
         search_layout.setSpacing(8)
 
-        search_hint = QLabel("这两种搜索各自独立配置，可只开一个，也可都开。")
-        search_hint.setObjectName("formLabel")
-        search_hint.setWordWrap(True)
-        search_layout.addWidget(search_hint)
-
         # Tavily
         self._tavily_on = ToggleSwitch()
         self._tavily_key = PasswordLineEdit()
         self._tavily_key.setPlaceholderText("tvly-...")
         search_layout.addWidget(self._search_card(
-            "Tavily", self._tavily_on, self._tavily_key,
-            "按次计费；需填写 Tavily 的 API Key。"))
+            "Tavily", self._tavily_on, self._tavily_key
+            ))
 
         # DeepSeek 搜索
         self._deepseek_on = ToggleSwitch()
         self._ds_search_key = PasswordLineEdit()
-        self._ds_search_key.setPlaceholderText("留空 = 沿用「模型」里的 DeepSeek Key")
+        self._ds_search_key.setPlaceholderText("留空即沿用模型配置里的DeepSeek官方API")
         search_layout.addWidget(self._search_card(
-            "DeepSeek 搜索", self._deepseek_on, self._ds_search_key,
-            "走 DeepSeek 官方 /tools/search；密钥可与模型共用，也可单独填。"))
+            "DeepSeek 搜索", self._deepseek_on, self._ds_search_key
+            ))
 
         # 优先级（只决定"两个都开着时先用谁"）
         prio_row = QHBoxLayout()
@@ -564,8 +559,6 @@ class SettingsDialog(QDialog):
         for _label, _value in (("Tavily", "tavily"),
                                ("DeepSeek 搜索", "deepseek")):
             self._search_backend.addItem(_label, _value)
-        self._search_backend.setToolTip(
-            "两个都开着时先用谁。只开一个时，用哪个与这里无关。")
         prio_row.addWidget(self._search_backend, 1)
         search_layout.addLayout(prio_row)
 
@@ -692,7 +685,7 @@ class SettingsDialog(QDialog):
     # ── 联网搜索卡片 ─────────────────────────────
 
     def _search_card(self, title: str, toggle: ToggleSwitch,
-                     key_edit: QWidget, note: str) -> QFrame:
+                     key_edit: QWidget, note: str = "") -> QFrame:
         """一张搜索服务卡片：`标题 + 状态点 + 开关`，下面一行密钥与一句说明。"""
         card = QFrame()
         card.setObjectName("searchCard")
@@ -717,10 +710,14 @@ class SettingsDialog(QDialog):
         toggle.toggled.connect(key_edit.setEnabled)
         col.addWidget(key_edit)
 
-        note_label = QLabel(note)
-        note_label.setObjectName("formLabel")
-        note_label.setWordWrap(True)
-        col.addWidget(note_label)
+        # ★ `note` 是可选的：说明文字属于"能删就删"的东西，
+        #   但**参数不能跟着删** —— 删了调用方就会漏传，构造直接抛 TypeError，
+        #   表现是"设置窗口打不开"。空字符串 = 不生成这一行。
+        if note:
+            note_label = QLabel(note)
+            note_label.setObjectName("formLabel")
+            note_label.setWordWrap(True)
+            col.addWidget(note_label)
         return card
 
     def _refresh_search_state(self) -> None:
