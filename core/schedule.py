@@ -1278,9 +1278,8 @@ class Scheduler:
             #   （"田间管理 水肥调控 病虫害防治"），既不知道当天天气、也不知道现在
             #   几月 —— 11 月给你一份"花铃期管理"（7-8 月的方案）。那不是提醒，是误导。
             #   "今天没有预警"本身就是完整的信息，不需要配话。
-            count = len(alerts)
             city = str(job.inputs.get("city") or "")
-            text = f"{city}当前没有生效的气象预警（全国 {count} 条在效）。"
+            text = f"{city}当前没有生效的气象预警。"
             st = self.state_of(job.id)
             st.last_status = "no-alarm"
             st.last_note = "手动运行：当前无生效预警"
