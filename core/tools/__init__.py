@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 
 from core.tools import capabilities, dispatch
+from core.tools.alerts import get_weather_alerts
 from core.tools.external import get_weather, web_search
 from core.tools.local_data import (
     analyze_yield,
@@ -59,6 +60,8 @@ TOOL_HANDLERS = {
     "analyze_yield": analyze_yield,
     # ★ 当日价格（现货指数 + 期货）：知识库那份 CSV 是打包快照，回答不了"今天"
     "get_cotton_index": get_cotton_index,
+    # ★ 官方气象预警（中央气象台）：定时任务与聊天共用同一个工具
+    "get_weather_alerts": get_weather_alerts,
 }
 
 

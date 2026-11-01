@@ -904,8 +904,15 @@ def section_pure(c: Checker) -> None:
                 sched_b.job("daily_brief").trigger, None,
                 datetime(2026, 10, 30, 7, 0)).isoformat(timespec="seconds"),
             str(by_id.get("daily_brief")))
+    # ★ weather_watch 现在是 daily+多时刻（06/12/18/00），不再是 interval。
+    #   要验「上次 + 周期」就得用一个**真正的 interval 任务**，不能借它的壳。
     c.check("status() 对 interval 任务给的是「上次 + 周期」",
-            by_id["weather_watch"]["next_run"] == "2026-10-30T07:00:00",
+            by_id["daily_brief"]["next_run"] == S.next_run(
+                sched_b.job("daily_brief").trigger, None,
+                datetime(2026, 10, 30, 7, 0)).isoformat(timespec="seconds"),
+            str(by_id.get("daily_brief")))
+    c.check("★ status() 对 multi-times 任务给的是下一个整点",
+            by_id["weather_watch"]["next_run"] == "2026-10-30T12:00:00",
             str(by_id.get("weather_watch")))
     c.check("status() 报告配置是否合法", all(r["valid"] for r in rows))
 

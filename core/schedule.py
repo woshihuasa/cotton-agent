@@ -93,16 +93,40 @@ class Trigger:
     at: str = "08:00"
     every_min: int = 60
     weekdays: tuple[int, ...] = ()
+    #: ★ 一天里的多个时刻（`"06:00"` 这种）。非空时**优先于** `at`。
+    #:   `interval` 表达不了"每天 6/12/18/24 点"这类**时钟对齐**的节奏 ——
+    #:   间隔是从上次触发往后数，装机的时刻不同就会漂到半夜。
+    times: tuple[str, ...] = ()
+
+    def clock_times(self) -> tuple[dtime, ...]:
+        """要判定的钟点（去重、按时间排序）。格式不对的项直接忽略，由 `validate()` 报错。"""
+        raw = self.times or ((self.at,) if self.at else ())
+        got: list[dtime] = []
+        for item in raw:
+            try:
+                got.append(parse_clock(str(item).strip()))
+            except ValueError:
+                continue
+        return tuple(sorted(set(got)))
 
     def validate(self) -> str:
         """返回空串表示合法；否则是一句人话的原因。"""
         if self.kind not in ("daily", "interval"):
             return f"未知的触发类型 {self.kind!r}（只支持 daily / interval）"
         if self.kind == "daily":
-            try:
-                parse_clock(self.at)
-            except ValueError as e:
-                return str(e)
+            if self.times:
+                if len(self.times) > 24:
+                    return f"times 最多 24 项，收到 {len(self.times)} 项"
+                for item in self.times:
+                    try:
+                        parse_clock(str(item))
+                    except ValueError as e:
+                        return str(e)
+            else:
+                try:
+                    parse_clock(self.at)
+                except ValueError as e:
+                    return str(e)
         else:
             if int(self.every_min or 0) < 1:
                 return f"interval 的 every_min 必须 ≥ 1，收到 {self.every_min!r}"
@@ -137,15 +161,21 @@ def due_at(
         nxt = last_fired + step
         return nxt if nxt <= now else None
 
-    at = parse_clock(trigger.at)
-    today_at = datetime.combine(now.date(), at)
     if trigger.weekdays and now.isoweekday() not in trigger.weekdays:
         return None
-    if today_at > now:
+    # ★ 一天多个时刻：取「今天已经过去的那些钟点里**最晚**的一个」。
+    #   取最晚而不是最早，是为了补发窗口的判断一致 —— 08:30 看的时候，
+    #   06:00 那次已经过去了，不该再补。
+    scheduled: datetime | None = None
+    for clock in trigger.clock_times():
+        cand = datetime.combine(now.date(), clock)
+        if cand <= now and (scheduled is None or cand > scheduled):
+            scheduled = cand
+    if scheduled is None:
         return None
-    if last_fired is not None and last_fired >= today_at:
+    if last_fired is not None and last_fired >= scheduled:
         return None
-    return today_at
+    return scheduled
 
 
 def next_run(
@@ -158,14 +188,17 @@ def next_run(
         step = timedelta(minutes=max(1, int(trigger.every_min)))
         return now if last_fired is None else last_fired + step
 
-    at = parse_clock(trigger.at)
+    clocks = trigger.clock_times()
+    if not clocks:
+        return None
     for offset in range(0, 9):
         day = (now + timedelta(days=offset)).date()
         if trigger.weekdays and day.isoweekday() not in trigger.weekdays:
             continue
-        cand = datetime.combine(day, at)
-        if cand > now:
-            return cand
+        for clock in clocks:                    # clock_times() 已排序
+            cand = datetime.combine(day, clock)
+            if cand > now:
+                return cand
     return None
 
 
@@ -386,6 +419,7 @@ class Job:
                 "at": self.trigger.at,
                 "every_min": int(self.trigger.every_min),
                 "weekdays": list(self.trigger.weekdays),
+                "times": list(self.trigger.times),
             },
             "inputs": dict(self.inputs),
             "grace_min": int(self.grace_min),
@@ -397,6 +431,20 @@ class Job:
             ],
             "notice": {"node": self.notice_node, "field": self.notice_field},
         }
+
+
+def _parse_times(raw: Any) -> tuple[str, ...]:
+    """配置里的 `times` → 元组。**坏项丢弃不炸**（时间格式由 `validate()` 兜）。"""
+    if isinstance(raw, str):
+        raw = [x for x in raw.split(",")]
+    if not isinstance(raw, (list, tuple)):
+        return ()
+    out: list[str] = []
+    for item in raw:
+        text = str(item).strip()
+        if text:
+            out.append(text)
+    return tuple(out)
 
 
 def _job_from_dict(raw: Any) -> Job | None:
@@ -459,6 +507,7 @@ def _job_from_dict(raw: Any) -> Job | None:
         trigger=Trigger(
             kind=str(trig_raw.get("kind") or "daily").strip(),
             at=str(trig_raw.get("at") or "08:00").strip(),
+            times=_parse_times(trig_raw.get("times")),
             every_min=every_min,
             weekdays=weekdays,
         ),
@@ -502,7 +551,11 @@ def default_jobs() -> list[Job]:
             workflow="weather_alert.yaml",
             kind="weather_watch",
             enabled=True,
-            trigger=Trigger(kind="interval", every_min=180),
+            # ★ 6 小时一次、**时钟对齐**（06/12/18/24 点）。
+            #   用 `interval` 表达不了：间隔是从上次触发往后数，装机的时刻不同
+            #   就会漂到半夜。这四个时刻也正好对应气象台每天的预报更新节奏。
+            trigger=Trigger(kind="daily",
+                            times=("06:00", "12:00", "18:00", "00:00")),
             inputs={"city": DEFAULT_CITY, "region": DEFAULT_REGION},
             repeat_min=DEFAULT_REPEAT_MIN,
             rules=[

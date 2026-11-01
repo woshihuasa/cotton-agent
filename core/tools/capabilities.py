@@ -70,6 +70,9 @@ CAPABILITIES: dict[str, ToolCapability] = {
     # 当日价格：只读、联网（抓指数页与期货接口）。不写盘，可重试。
     "get_cotton_index": ToolCapability(read_only=True, destructive=False,
                                        open_world=True),
+    # 气象预警：只读、联网、可重试（读公开接口，不写盘）
+    "get_weather_alerts": ToolCapability(read_only=True, destructive=False,
+                                         open_world=True),
 }
 
 

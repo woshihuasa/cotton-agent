@@ -209,6 +209,33 @@ TOOL_SCHEMAS: list[dict] = [
         {
             "type": "function",
             "function": {
+                "name": "get_weather_alerts",
+                "description": (
+                    "查询某地区**当前生效**的气象预警信号（中央气象台官方发布，"
+                    "含蓝/黄/橙/红等级、发布单位与时间）。"
+                    "用户问『有没有预警』『要不要防灾』『天气怎么样』且关心是否成灾时调用；"
+                    "只问未来天气温度请用 get_weather。"
+                    "返回里 summary 是现成的中文摘要，items 是结构化条目。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "region": {
+                            "type": "string",
+                            "description": "地区或城市名，按标题匹配，如 阿克苏。",
+                        },
+                        "area_code": {
+                            "type": "string",
+                            "description": "6 位行政区划代码，比名字精确，如 652901。",
+                        },
+                    },
+                    "required": [],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "get_cotton_index",
                 "description": (
                     "获取**当日**棉花价格：中国棉花价格指数（CC Index 3128B，全国口径）、"
