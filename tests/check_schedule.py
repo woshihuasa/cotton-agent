@@ -862,6 +862,41 @@ def section_alarm(c: Checker) -> None:
                 runner.submitted[-1][2].get("alarm_level") == "橙色",
                 str(runner.submitted[-1][2].get("alarm_level")))
 
+        # ★★ 竞态回归：`_submit` 起线程之前必须已登记客观部分。
+        #    第一版是"提交之后再写"，工作流跑得快时 `_watch` 先到，pop 到空字典，
+        #    推送就退化成"任务名 + 模型正文"（用户实测到的就是这种）。
+        import threading as _th
+        import time as _time
+        _feed([_alert("65290141600000_9", "大风", "蓝色")])
+        sched_r, runner_r, events_r = _fresh(
+            watch, outputs={"advice": {"body": "风大时暂停喷药。"}})
+        sched_r.run_now("weather_watch")
+        waited = 0.0
+        while waited < 3.0 and not any(e.get("type") == "notice" for e in events_r):
+            _time.sleep(0.02)
+            waited += 0.02
+        notices = [e for e in events_r if e.get("type") == "notice"]
+        c.check("★ 手动运行会发出 notice", bool(notices), str(events_r))
+        if notices:
+            text = str(notices[0].get("text") or "")
+            c.check("★★ 竞态修复：notice 里带着客观事实句（等级 + 气象原文）",
+                    text.startswith("阿克苏地区") and "阵风7级" in text, text[:80])
+            c.check("★★ 且带「农事建议：」标签与模型正文",
+                    "农事建议：" in text and "风大时暂停喷药。" in text, text[:120])
+            c.check("★ 标题是等级，不是任务名",
+                    notices[0].get("title") == "大风蓝色预警",
+                    str(notices[0].get("title")))
+
+        # ★ 手动运行且**没有**生效预警：必须标明"这不是预警"
+        _feed([])
+        sched_m, runner_m, _ = _fresh(watch)
+        sched_m.run_now("weather_watch")
+        c.check("★ 手动运行无预警时仍会生成一条（便于自检）",
+                bool(runner_m.submitted), str(len(runner_m.submitted)))
+        c.check("★ 但等级字段是「无」，不是编一个",
+                runner_m.submitted[0][2].get("alarm_level") == "无",
+                str(runner_m.submitted[0][2].get("alarm_level")))
+
         # ④ 没有生效信号 → 不报
         _feed([])
         sched2, runner2, _ = _fresh(watch)

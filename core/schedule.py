@@ -1024,10 +1024,10 @@ class Scheduler:
             return ""
 
         meta, extra = self._alert_payload(pick)
-        run_id = self._submit(job, scheduled, extra_inputs=extra)
+        run_id = self._submit(job, scheduled, extra_inputs=extra,
+                              notice_meta=meta)
         if not run_id:
             return ""
-        self._notice_meta[run_id] = meta
         st.last_alert_key = key
         st.last_alert_at = _iso(now)
         _append_ids(st, [pick.alertid])
@@ -1039,7 +1039,8 @@ class Scheduler:
     # ---- 提交 ----
 
     def _submit(self, job: Job, scheduled: datetime,
-                *, extra_inputs: dict | None) -> str:
+                *, extra_inputs: dict | None,
+                notice_meta: dict | None = None) -> str:
         """校验 → 注入运行时对象 → 交执行器。成功返回 run_id，失败返回空串。"""
         wf, issues = self._load_workflow(job.workflow)
         if wf is None:
@@ -1141,6 +1142,12 @@ class Scheduler:
         self._record(job, self.state_of(job.id), "fired", scheduled,
                      note="已提交", run_id=run_id)
 
+        # ★ 必须在**起线程之前**登记：`_watch` 的第一件事就是 pop 它。
+        #   第一版是 `_submit` 返回后由调用方写入，工作流跑得快时 `_watch` 先到，
+        #   pop 到空字典 → 推送退回"任务名 + 模型正文"，三段式（等级 + 气象原文 +
+        #   农事建议）整段丢失。用户实测到的正是这种"看起来像旧版"的输出。
+        if notice_meta:
+            self._notice_meta[run_id] = dict(notice_meta)
         threading.Thread(target=self._watch, name=f"sched-{job.id}",
                          args=(job, run_id), daemon=True).start()
         return run_id
@@ -1205,17 +1212,26 @@ class Scheduler:
             if hits:
                 pick = max(hits, key=lambda a: (a.rank, a.issuetime))
                 meta, extra = self._alert_payload(pick)
-                run_id = self._submit(job, now, extra_inputs=extra)
-                if run_id:
-                    self._notice_meta[run_id] = meta
-                return run_id
-            # 没有生效预警也给一条：手动运行通常是"想看看它会说什么"
+                return self._submit(job, now, extra_inputs=extra,
+                                    notice_meta=meta)
+            # ★ 没有生效预警时也要说清楚"这不是预警"。
+            #   用户点「立即运行」是想看看它会说什么；若不给告知，模型会照着知识库
+            #   写一整段季节管理（"花铃期要盯住土壤墒情……"），看起来像一条预警 ——
+            #   而实际上当地什么预警都没发。那是**把"没事"包装成"有事"**。
+            count = len(alerts)
+            meta = {
+                "title": "当前无生效预警",
+                "preamble": (f"{job.inputs.get('city') or ''}当前没有生效的气象预警"
+                             f"（全国 {count} 条在效）。以下是按季节整理的常规提醒，"
+                             f"不是预警。"),
+                "url": "",
+            }
             return self._submit(job, now, extra_inputs={
-                "alarm": "（手动运行）当前没有生效的预警信号。",
+                "alarm": "当前没有生效的预警信号。",
                 "alarm_level": "无",
                 "alarm_window": "",
                 "official_advice": "",
-                "alarm_topic": alarms.DEFAULT_TOPIC})
+                "alarm_topic": alarms.DEFAULT_TOPIC}, notice_meta=meta)
         return self._submit(job, now, extra_inputs=None)
 
     def _alert_payload(self, alert: alarms.Alert) -> tuple[dict, dict]:
@@ -1303,6 +1319,11 @@ class Scheduler:
             return
 
         meta = self._notice_meta.pop(run_id, {}) or {}
+        if not meta and job.kind == "weather_watch":
+            # ★ 这种情况意味着"客观部分"没登记上，推送会退化成"任务名 + 模型正文"。
+            #   留一条日志 —— 否则用户只会看到格式变了，而现场已经无从复现。
+            log.warning("预警推送缺少客观部分（run=%s job=%s）："
+                        "这次会退化成不带等级与气象原文的格式", run_id, job.id)
         path = self._archive(job, text, source_url=str(meta.get("url") or ""))
         st.last_status = "delivered"
         st.last_note = f"已推送；存档 {path.name if path else '（未写成）'}"
