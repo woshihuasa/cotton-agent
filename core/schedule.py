@@ -486,6 +486,24 @@ class Job:
         }
 
 
+def _resolve_weather_days(job_id: str, raw: Any) -> int:
+    """`weather_days` 没写在配置里时，**按 id 从出厂默认补齐**。
+
+    ★ 为什么不能只靠"新配置写进去"：这个字段是后来才加的，老用户的
+      `schedule.json` 里根本没有它 → 读出来是 0 → 不预取天气 → 工作流缺
+      `weather_text` 直接跳过。表现就是「skipped 缺少必需输入: weather_text」，
+      而且用户完全看不出这是升级造成的。
+    ★ 显式配了（>0）就以配置为准，方便以后做开关。
+    """
+    got = _safe_int(raw)
+    if got > 0:
+        return got
+    for default in default_jobs():
+        if default.id == job_id:
+            return int(default.weather_days or 0)
+    return 0
+
+
 def _safe_int(raw: Any, default: int = 0) -> int:
     """配置里的整数：坏值退回默认值，不抛。"""
     try:
@@ -577,7 +595,8 @@ def _job_from_dict(raw: Any) -> Job | None:
         repeat_min=repeat,
         rules=rules,
         notice_node=str(notice.get("node") or "").strip(),
-        weather_days=_safe_int(raw.get("weather_days")),
+        weather_days=_resolve_weather_days(
+            str(raw.get("id") or "").strip(), raw.get("weather_days")),
         notice_field=str(notice.get("field") or "body").strip(),
     )
 

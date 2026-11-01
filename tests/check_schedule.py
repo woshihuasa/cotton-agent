@@ -541,6 +541,40 @@ def section_config(c: Checker) -> None:
             [j.trigger.times for j in sched_mig2.jobs if j.id == "weather_watch"]
             == [("06:00", "12:00", "18:00", "00:00")], "")
 
+    # ★ 老配置里没有 `weather_days` 字段 → 必须按 id 从出厂默认补齐。
+    #   否则简报会缺 `weather_text` 被跳过（用户实测：skipped 缺少必需输入）。
+    _isolate()
+    no_wd = {"jobs": [
+        {"id": "daily_brief", "workflow": "daily_brief.yaml", "kind": "workflow",
+         "enabled": True, "trigger": {"kind": "daily", "at": "08:00"},
+         "inputs": {"city": "阿克苏", "region": "阿克苏地区"},
+         "notice": {"node": "brief", "field": "body"}},
+    ]}
+    (S.schedule_dir() / "schedule.json").write_text(
+        json.dumps(no_wd, ensure_ascii=False), encoding="utf-8")
+    sched_wd = S.Scheduler(fetcher=lambda city, when: "")
+    sched_wd.load()
+    c.check("★ 老配置缺 weather_days → 从出厂默认补齐（3 天）",
+            sched_wd.job("daily_brief").weather_days == 3,
+            str(sched_wd.job("daily_brief").weather_days))
+
+    # 显式配了就以配置为准
+    _isolate()
+    explicit = {"jobs": [
+        {"id": "daily_brief", "workflow": "daily_brief.yaml", "kind": "workflow",
+         "enabled": True, "trigger": {"kind": "daily", "at": "08:00"},
+         "inputs": {"city": "阿克苏", "region": "阿克苏地区"},
+         "weather_days": 1,
+         "notice": {"node": "brief", "field": "body"}},
+    ]}
+    (S.schedule_dir() / "schedule.json").write_text(
+        json.dumps(explicit, ensure_ascii=False), encoding="utf-8")
+    sched_wd2 = S.Scheduler(fetcher=lambda city, when: "")
+    sched_wd2.load()
+    c.check("显式配的 weather_days 优先（1 天）",
+            sched_wd2.job("daily_brief").weather_days == 1,
+            str(sched_wd2.job("daily_brief").weather_days))
+
     # ★ 手改过的节奏（既不是新默认、也不是任何历史值）→ 不许被升级抹掉
     _isolate()
     custom = {"jobs": [
