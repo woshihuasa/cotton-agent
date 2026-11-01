@@ -231,6 +231,70 @@ def match(alerts: list[Alert], *, area_hint: str = "",
     return list(alerts)
 
 
+_WINDOW_RE = re.compile(r"未来\s*(\d+)\s*(小时|分钟|天)")
+_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def parse_detail(html: str) -> dict:
+    """预警详情页 → `{body, defense, window}`。
+
+    ★ 为什么要抓详情：列表接口只给标题（"大风蓝色预警信号"），**定量的时效与量级
+      全在详情正文里** —— 「预计未来 24 小时内我县将出现 6 级（或阵风 7 级）以上大风」。
+      没有这一段，就只剩一个等级标签，说不清"多大、多久"。
+
+    ★ 时效**必须从正文读**，不能预设：大风蓝色是 24 小时，雷雨大风黄色是 6 小时，
+      各信号不同。写死"未来 6 小时"会张冠李戴。
+    """
+    if not html:
+        return {"body": "", "defense": "", "window": ""}
+    text = re.sub(r"(?s)<script.*?</script>", " ", html)
+    text = re.sub(r"(?s)<style.*?</style>", " ", text)
+    text = _TAG_RE.sub(" ", text)
+    text = (text.replace("&nbsp;", " ").replace("&amp;", "&")
+                .replace("&lt;", "<").replace("&gt;", ">"))
+    text = re.sub(r"\s+", " ", text).strip()
+
+    # ★ 正文从**最后一个「X气象台」**开始截 —— 页面头部还有导航与发布日期，
+    #   直接从"发布"起截会把"进入 恭城 天气预报"这类导航文字一起带进来。
+    cut = text.find("防御指南")
+    head = text[:cut] if cut > 0 else text
+    start = -1
+    for mm in re.finditer(r"[\u4e00-\u9fa5]{2,12}气象台", head):
+        start = mm.start()
+    body = head[start:].strip() if start >= 0 else ""
+    if not body:
+        i = text.find("预警信号")
+        body = text[i:].strip() if i >= 0 else ""
+
+    defense = ""
+    d = re.search(r"防御指南[::]?\s*(.+?)(?:推荐服务|$)", text)
+    if d:
+        defense = d.group(1).lstrip("：: ").strip()[:600]
+
+    w = _WINDOW_RE.search(body or text)
+    window = f"{w.group(1)}{w.group(2)}" if w else ""
+    return {"body": body[:800], "defense": defense, "window": window}
+
+
+def fetch_detail(alert: Alert, *, timeout_s: float = 15.0) -> dict:
+    """取一条预警的详情（**只取被选中的那一条**，不做批量）。失败返回空字典。"""
+    path = str(getattr(alert, "url", "") or "").strip()
+    if not path:
+        return {}
+    url = path if path.startswith("http") else "http://www.nmc.cn" + path
+    try:
+        resp = requests.get(url, headers=_UA, timeout=timeout_s)
+        resp.raise_for_status()
+        # ★ 这个站点不返回 charset，`resp.text` 会按 latin-1 解出乱码，必须自己解。
+        html = resp.content.decode("utf-8", errors="replace")
+        got = parse_detail(html)
+        got["url"] = url
+        return got
+    except Exception as e:                                    # noqa: BLE001
+        log.warning("预警详情取不到（%s）：%s: %s", url, type(e).__name__, e)
+        return {}
+
+
 def format_for_model(alerts: list[Alert], *, limit: int = 8) -> str:
     """给模型看的一段文字（等级、单位、时间都来自官方原文）。"""
     if not alerts:
@@ -248,4 +312,5 @@ def format_for_model(alerts: list[Alert], *, limit: int = 8) -> str:
 
 __all__ = ["Alert", "DEFAULT_TOPIC", "LEVEL_RANK", "LIST_API", "SIGNAL_TOPICS",
            "area_code_of", "clear_cache", "fetch_alerts", "format_for_model",
-           "match", "parse_title", "topic_keywords"]
+           "fetch_detail", "match", "parse_detail", "parse_title",
+           "topic_keywords"]

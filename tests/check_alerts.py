@@ -123,6 +123,56 @@ def section_match(c: Checker) -> None:
     c.check("筛不到 → 空列表（不是全部）", alarms.match(data, area_hint="北京") == [])
 
 
+_DETAIL_HTML = """
+<html><head><style>.x{color:red}</style><script>var a=1;</script></head><body>
+<div>中央气象台 导航 进入 恭城 天气预报</div>
+<div class="content">恭城县气象台1日22时32分发布大风蓝色预警信号：预计未来24小时内我县将出现
+6级（或阵风7级）以上大风，请做好防范。</div>
+<div>防御指南： 1.政府及相关部门按照职责做好防大风工作； 2.关好门窗，加固围板。</div>
+<div>推荐服务 妈祖（MAZU）早期预警</div>
+</body></html>
+"""
+
+
+def section_detail(c: Checker) -> None:
+    c.section("第 3 节（续）：★ 预警详情（未来数小时的定量描述在这里）")
+
+    got = alarms.parse_detail(_DETAIL_HTML)
+    c.check("★ 正文只保留预警那句（页面导航不混进来）",
+            got["body"].startswith("恭城县气象台") and "天气预报" not in got["body"],
+            got["body"][:60])
+    c.check("★ 正文含定量的时效与量级",
+            "未来24小时内" in got["body"] and "阵风7级" in got["body"], got["body"][:80])
+    c.check("★ 时效从正文读出来（不是写死的 6 小时）",
+            got["window"] == "24小时", str(got["window"]))
+    c.check("防御指南单独提取且不留前导冒号",
+            got["defense"].startswith("1.政府"), got["defense"][:20])
+    c.check("脚本与样式被剥掉", "<" not in got["body"] and "color:red" not in got["body"])
+
+    # 6 小时的信号也能读对（不同信号时效不同）
+    html6 = ("某县气象台1日22时32分发布雷雨大风黄色预警信号：预计未来6小时内，"
+             "平均风力可达8级，阵风9级并伴有雷电。防御指南：1.停止户外作业；")
+    c.check("★ 6 小时时效同样从原文读出",
+            alarms.parse_detail(html6)["window"] == "6小时",
+            str(alarms.parse_detail(html6)["window"]))
+
+    c.check("空页面 → 空结构（不抛）",
+            alarms.parse_detail("") == {"body": "", "defense": "", "window": ""})
+
+    # fetch_detail 失败要安静降级（不抛、不缓存坏值）
+    real_get = alarms.requests.get
+
+    def boom(*_a, **_k):
+        raise alarms.requests.RequestException("超时")
+    alarms.requests.get = boom
+    try:
+        a = _mk("65290141600000_1", "某气象台发布大风蓝色预警信号")
+        c.check("★ 详情取不到 → 返回空字典（不抛异常）",
+                alarms.fetch_detail(a) == {})
+    finally:
+        alarms.requests.get = real_get
+
+
 def section_format(c: Checker) -> None:
     c.section("第 3 节：给模型看的文字（等级与单位来自原文）")
 
@@ -287,6 +337,7 @@ def main() -> int:
         section_parse(c)
         section_topic(c)
         section_match(c)
+        section_detail(c)
         section_format(c)
         section_fetch(c)
         section_tool(c)

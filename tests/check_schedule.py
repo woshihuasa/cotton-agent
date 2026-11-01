@@ -781,9 +781,18 @@ def section_alarm(c: Checker) -> None:
         return A.Alert(alertid=alertid, title=title, issuetime=when,
                        area_code=A.area_code_of(alertid), **A.parse_title(title))
 
-    def _feed(items):
-        """把 alarms.fetch_alerts 换成固定返回值。"""
+    real_detail = A.fetch_detail
+
+    _DETAIL = {"body": "阿克苏地区气象台1日22时32分发布大风蓝色预警信号：预计未来24小时内"
+                       "将出现6级（或阵风7级）以上大风，请做好防范。",
+               "defense": "1.加固棚膜；2.暂停喷药。",
+               "window": "24小时",
+               "url": "http://www.nmc.cn/publish/alarm/x.html"}
+
+    def _feed(items, detail=None):
+        """把 alarms 的两个网络入口都换成固定返回值。"""
         A.fetch_alerts = lambda **k: (list(items), "")
+        A.fetch_detail = lambda *a, **k: dict(detail or _DETAIL)
         return items
 
     A.clear_cache()
@@ -802,6 +811,26 @@ def section_alarm(c: Checker) -> None:
                 "防风" in str(payload.get("alarm_topic"))
                 and "6" not in str(payload.get("alarm_topic")),
                 str(payload.get("alarm_topic")))
+        c.check("★ 等级作为独立输入交给工作流（模型改不了它）",
+                payload.get("alarm_level") == "蓝色", str(payload.get("alarm_level")))
+        c.check("★ 时效从原文读出来一并传入",
+                payload.get("alarm_window") == "24小时", str(payload.get("alarm_window")))
+        c.check("★ 官方防御指南作为参考传入",
+                "加固棚膜" in str(payload.get("official_advice")),
+                str(payload.get("official_advice")))
+
+        # ★ 三段式的前两段：等级 + 未来数小时的定量描述，由代码拼、模型碰不到
+        pick = A.match([_alert("65290141600000_1", "大风", "蓝色")],
+                       area_hint="阿克苏")[0]
+        meta, extra = sched._alert_payload(pick)
+        c.check("★ 推送标题就是等级（不再固定成任务名）",
+                meta["title"] == "大风蓝色预警", str(meta.get("title")))
+        c.check("★ 前置事实块含等级与时效",
+                "【大风蓝色预警】" in meta["preamble"]
+                and "未来 24 小时" in meta["preamble"], meta.get("preamble"))
+        c.check("★ 事实块引的是官方原文（有量级）",
+                "阵风7级" in meta["preamble"], meta.get("preamble"))
+        c.check("★ 附原文链接", meta.get("url", "").startswith("http"), str(meta.get("url")))
 
         # ② 同一条信号（同一 alertid）不再重复
         t1 = t0 + timedelta(minutes=watch.repeat_min + 1)
@@ -817,8 +846,8 @@ def section_alarm(c: Checker) -> None:
         c.check("★ 等级升级 → 再报一次", sched.tick(t3) == ["weather_watch"],
                 str(runner.submitted))
         c.check("升级那次带的是橙色",
-                "橙色" in str(runner.submitted[-1][2].get("alarm")),
-                str(runner.submitted[-1][2].get("alarm")))
+                runner.submitted[-1][2].get("alarm_level") == "橙色",
+                str(runner.submitted[-1][2].get("alarm_level")))
 
         # ④ 没有生效信号 → 不报
         _feed([])
@@ -846,11 +875,14 @@ def section_alarm(c: Checker) -> None:
                _alert("65290141600000_4", "高温", "红色")])
         sched4, runner4, _ = _fresh(watch)
         c.check("★ 多条信号时挑等级最高的先报", sched4.tick(t0) == ["weather_watch"])
-        c.check("报的是红色高温",
-                "高温红色" in str(runner4.submitted[0][2].get("alarm")),
-                str(runner4.submitted[0][2].get("alarm")))
+        c.check("报的是红色那条（等级与类型都对）",
+                runner4.submitted[0][2].get("alarm_level") == "红色"
+                and "高温" in str(runner4.submitted[0][2].get("alarm_topic")),
+                f"{runner4.submitted[0][2].get('alarm_level')} / "
+                f"{runner4.submitted[0][2].get('alarm_topic')}")
     finally:
         A.fetch_alerts = real_fetch
+        A.fetch_detail = real_detail
         A.clear_cache()
 
 
@@ -888,8 +920,9 @@ def section_contracts(c: Checker) -> None:
         required = {k for k, v in wf.inputs.items() if v.required}
         supplied = set(job.inputs)
         if job.kind == "weather_watch":
-            # ★ 触发层在运行时注入的三样
-            supplied |= {"alarm", "alarm_topic", "today"}
+            # ★ 触发层在运行时注入的那些（等级/时效/官方指南都来自预警原文）
+            supplied |= {"alarm", "alarm_level", "alarm_window",
+                         "official_advice", "alarm_topic", "today"}
         else:
             supplied |= {"today"}
         c.check(f"★ {job.id} 提供了 {wf_name} 的全部必填输入",

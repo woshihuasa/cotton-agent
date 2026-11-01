@@ -719,6 +719,9 @@ class Scheduler:
         self._inflight: dict[str, str] = {}
         self._lock = threading.Lock()
         self._dirty = False
+        #: 每次提交的「客观部分」（标题、事实块、原文链接）。
+        #: ★ 等级与气象描述**不能过模型** —— 放这里由 `_watch` 前置拼装。
+        self._notice_meta: dict[str, dict] = {}
         self._loaded = False
 
         self._stop = threading.Event()
@@ -1006,10 +1009,11 @@ class Scheduler:
             self._dirty = True
             return ""
 
-        if not self._submit(job, scheduled, extra_inputs={
-                "alarm": alarms.format_for_model([pick], limit=1),
-                "alarm_topic": alarms.topic_keywords(pick.signal)}):
+        meta, extra = self._alert_payload(pick)
+        run_id = self._submit(job, scheduled, extra_inputs=extra)
+        if not run_id:
             return ""
+        self._notice_meta[run_id] = meta
         st.last_alert_key = key
         st.last_alert_at = _iso(now)
         _append_ids(st, [pick.alertid])
@@ -1186,15 +1190,54 @@ class Scheduler:
             hits = alarms.match(alerts, area_hint=str(job.inputs.get("city") or ""))
             if hits:
                 pick = max(hits, key=lambda a: (a.rank, a.issuetime))
-                return self._submit(job, now, extra_inputs={
-                    "alarm": alarms.format_for_model([pick], limit=1),
-                    "alarm_topic": alarms.topic_keywords(pick.signal)})
+                meta, extra = self._alert_payload(pick)
+                run_id = self._submit(job, now, extra_inputs=extra)
+                if run_id:
+                    self._notice_meta[run_id] = meta
+                return run_id
             # 没有生效预警也给一条：手动运行通常是"想看看它会说什么"
             return self._submit(job, now, extra_inputs={
-                "alarm": ("（手动运行）当前没有生效的预警信号，"
-                          "以下按次日预报与常规农事整理。"),
+                "alarm": "（手动运行）当前没有生效的预警信号。",
+                "alarm_level": "无",
+                "alarm_window": "",
+                "official_advice": "",
                 "alarm_topic": alarms.DEFAULT_TOPIC})
         return self._submit(job, now, extra_inputs=None)
+
+    def _alert_payload(self, alert: alarms.Alert) -> tuple[dict, dict]:
+        """一条预警 → `(推送用的客观部分, 工作流输入)`。
+
+        ★ **三段式的前两段在这里成型，模型碰不到**：
+          ① 等级（`title`）—— 来自官方标题解析，不改写；
+          ② 未来数小时的气象 —— 来自详情正文（含"未来 24 小时内……阵风 7-8 级"），
+             原文照引，不做摘要；
+          ③ 农事建议 —— 留给 `llm.summarize`，由 `_watch` 拼在事实块之后。
+        """
+        detail = alarms.fetch_detail(alert)
+        body = str(detail.get("body") or "").strip()
+        window = str(detail.get("window") or "").strip()
+        defense = str(detail.get("defense") or "").strip()
+        url = str(detail.get("url") or "").strip()
+
+        signal = alert.signal or "气象"
+        level = alert.level or ""
+        title = f"{signal}{level}预警" if level else f"{signal}预警"
+
+        # 「24小时」→「24 小时」，中文里数字与单位之间留空格更好读
+        shown = re.sub(r"(\d+)(小时|分钟|天)", r"\1 \2", window) if window else ""
+        fact_lines = [f"【{title}】"]
+        if shown:
+            fact_lines.append(f"未来 {shown}内需注意，气象台原文：")
+        fact_lines.append(body or alert.title)
+        meta = {"title": title, "preamble": "\n".join(fact_lines), "url": url}
+        extra = {
+            "alarm": body or alert.title,
+            "alarm_level": level or "未标注",
+            "alarm_window": window,
+            "official_advice": defense,
+            "alarm_topic": alarms.topic_keywords(alert.signal),
+        }
+        return meta, extra
 
     def _watch(self, job: Job, run_id: str) -> None:
         """等工作流跑完 → 取文字 → 存档 → 推送。**在线程里跑，不阻塞调度。**"""
@@ -1251,8 +1294,17 @@ class Scheduler:
         st.last_note = f"已推送；存档 {path.name if path else '（未写成）'}"
         self._dirty = True
         self.save_state()
+        # ★ 客观部分前置：等级 + 官方定量描述；模型写的建议接在后面；末尾给原文链接。
+        meta = self._notice_meta.pop(run_id, {}) or {}
+        title = str(meta.get("title") or job.title or job.id)
+        preamble = str(meta.get("preamble") or "").strip()
+        if preamble:
+            text = f"{preamble}\n\n{text}".strip()
+        url = str(meta.get("url") or "").strip()
+        if url:
+            text = f"{text}\n\n原文：{url}"
         self._emit({"type": "notice", "job": job.id, "run_id": run_id,
-                    "title": job.title or job.id, "text": text,
+                    "title": title, "text": text,
                     "path": str(path) if path else ""})
 
     def _archive(self, job: Job, text: str) -> Path | None:

@@ -1,45 +1,35 @@
-# 极端天气预警 —— 官方预警信号命中后由触发层拉起（`core/schedule.py`）
+# 极端天气预警 —— 官方信号 + 未来数小时的定量描述 → 农事建议
 #
-# 【这条工作流的职责】
-#   气象台已经**判定并发布了**预警（蓝色/黄色/橙色/红色），这一级不由我们算。
-#   工作流要做的只有三件事：
+# 【三段式，责任分开】
+#   给用户的内容分成三段，前两段**由代码拼、模型碰不到**，第三段才交给模型：
 #
-#     ① 拿到**定量**的次日预报（温度、风力、降水量）—— 官方信号是定性的
-#        （"大风蓝色预警"），而农事建议必须说清"多大风、什么时候、能不能作业"；
-#     ② 按**信号主题**去知识库找处置措施（知识库里是散文，没有数字，
-#        所以检索用农事动作词，不用读数）；
-#     ③ 把「信号 + 读数 + 措施」写成一段农户能照着做的话。
+#     ① 预警等级      ← 官方原文（蓝色/黄色/橙色/红色），不接受模型改写
+#     ② 未来数小时的气象 ← 官方详情正文里的定量描述（"未来 24 小时内……阵风 7-8 级"）
+#     ③ 农事建议      ← 模型依据 ② 与知识库摘录写成
 #
-# 【为什么检索用 alarm_topic 而不是 alarm 原文】
-#   原文是「- 大风：白天风力 6」这种带数字的句子。知识库里没有数字，
-#   用数字去检索散文会跑偏。所以触发层把它翻成主题词
-#   （`core/alarms.py::topic_keywords`），例如「防风 压膜 化控 喷药」。
-#   数字仍然交给模型，只是不进检索。
+# 【为什么不再取"次日预报"】
+#   预警讲的是**未来数小时到一天内**的事（大风蓝色 24 小时、雷雨大风黄色 6 小时），
+#   而次日预报讲的是"明天白天怎么样" —— 两个时间窗对不上，拿后者去解释前者会写出
+#   自相矛盾的建议。定量的时效与量级**已经写在预警正文里**，不需要另找数据源。
 #
-# 【检索为空不算失败】
-#   `optional: true` —— 极端天气是低频事件，库里恰好没有"沙尘暴"专题很正常。
-#   宁可拿读数与通用措施写一条，也不该让整条预警发不出去。
+# 【为什么标题不由模型写】
+#   等级是事实。让模型写标题，就有机会把"蓝色"写成"较强"甚至升成"橙色"。
+#   所以标题由触发层用官方字段拼，模型只写建议正文。
 id: weather_alert
 version: 1
-description: 官方预警信号 → 次日定量预报 → 知识库措施 → 一段提前处置建议
+description: 官方预警（等级 + 未来数小时定量描述）→ 知识库措施 → 农事建议
 
 inputs:
-  city:        { type: string, required: true,  description: 城市名（高德口径） }
-  region:      { type: string, required: true,  description: 地区名 }
-  alarm:       { type: string, required: true,  description: 官方预警信号原文（触发层给出） }
-  alarm_topic: { type: string, required: true,  description: 检索主题词（信号类型 → 农事动作） }
+  city:            { type: string, required: true,  description: 城市名（高德口径） }
+  region:          { type: string, required: true,  description: 地区名 }
+  alarm:           { type: string, required: true,  description: 预警原文（含未来时效与量级） }
+  alarm_level:     { type: string, required: true,  description: 官方等级：蓝色/黄色/橙色/红色 }
+  alarm_window:    { type: string, required: false, description: 时效，如「24小时」（从原文读） }
+  alarm_topic:     { type: string, required: true,  description: 检索主题词（信号 → 农事动作） }
+  official_advice: { type: string, required: false, description: 官方防御指南（只作参考） }
 
 nodes:
-  # ① 定量读数。★ 再取一次天气是为了让建议里有原始数字（温度/风力/降水），
-  #    而不是只转述一句"大风蓝色预警"。
-  - id: weather
-    type: tool.get_weather
-    params:
-      city: "{{city}}"
-      date: tomorrow
-    side_effect: network
-
-  # ② 措施依据。query 由「地区 + 棉花 + 信号主题词」组成，不带数字。
+  # ① 措施依据：query = 地区 + 棉花 + 信号主题词（不带数字，知识库里是散文）
   - id: tips
     type: data.kb_query
     params:
@@ -48,14 +38,13 @@ nodes:
       optional: true
     side_effect: none
 
-  # ③ 成文。prompt 里用 {{alarm}} 引用官方原文（占位符由引擎按输入名替换）。
+  # ② 成文：**只写农事建议**，等级与气象描述由触发层前置（模型不重复、不改写）
   - id: advice
     type: llm.summarize
     params:
       prompt_ref: prompts/weather_alert.md
-      inputs: [weather, tips]
+      inputs: [tips]
       output_schema:
-        title: string
         body: string
     side_effect: network
-    needs: [weather, tips]
+    needs: [tips]
