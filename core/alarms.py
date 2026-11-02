@@ -348,7 +348,13 @@ def clean_brief(body: str, area: str = "") -> str:
     # 「我县/本县」→ 去掉，前面已经带上地名
     for word in ("我县", "本县", "我区", "本区", "我市", "本市"):
         desc = desc.replace(word, "")
-    return f"{area}{desc}" if area else desc
+    if not area:
+        return desc
+    # ★ 描述里**已经出现地名**就不再前缀，否则会出现
+    #   「塔什库尔干县预计…塔什库尔干县各地…」这种重复。
+    if area in desc:
+        return desc
+    return f"{area}{desc}"
 
 _TAG_RE = re.compile(r"<[^>]+>")
 

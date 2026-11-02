@@ -61,6 +61,13 @@ def main() -> int:
     c.check("注解表键集 == schema 工具名集",
             set(capabilities.CAPABILITIES) == schema_names,
             f"{sorted(capabilities.CAPABILITIES)} vs {sorted(schema_names)}")
+    # ★ 会写盘的工具不能标成"只读"：能力闸门靠这个声明拦写操作
+    c.check("★ `plot_trend` 不是只读（会写图）",
+            capabilities.CAPABILITIES["plot_trend"].read_only is False, "")
+    c.check("★ `analyze_yield` 不是只读（也会写图）",
+            capabilities.CAPABILITIES["analyze_yield"].read_only is False,
+            str(capabilities.CAPABILITIES["analyze_yield"]))
+
     c.check("工具数确为 8（新增工具必须同时改这一行，防「悄悄多出来一个」）",
             len(schema_names) == 8, str(len(schema_names)))
     c.check("known_tool_names() 与 schema 一致",

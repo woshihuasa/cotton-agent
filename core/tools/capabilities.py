@@ -64,7 +64,12 @@ CAPABILITIES: dict[str, ToolCapability] = {
                                          open_world=False),
     "calc_price_volatility": ToolCapability(read_only=True, destructive=False,
                                             open_world=False),
-    "analyze_yield": ToolCapability(read_only=True, destructive=False, open_world=False),
+    # ★ analyze_yield 会**生成图表文件**（`next_chart_path` 落盘），所以不是只读。
+    #   原先标成 read_only=True：Web 访客模式下闸门会放行它写盘，而"只读"这个
+    #   声明本来是用来阻止这件事的。它不是破坏性的（每次新建文件、不覆盖用户数据），
+    #   所以 destructive 保持 False。
+    "analyze_yield": ToolCapability(read_only=False, destructive=False,
+                                    open_world=False),
     # plot_trend 会把图表**写到磁盘**（chart_path），因此不是只读、且可破坏
     "plot_trend": ToolCapability(read_only=False, destructive=True, open_world=False),
     # 当日价格：只读、联网（抓指数页与期货接口）。不写盘，可重试。

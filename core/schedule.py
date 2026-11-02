@@ -1460,15 +1460,19 @@ class Scheduler:
             #   留一条日志 —— 否则用户只会看到格式变了，而现场已经无从复现。
             log.warning("预警推送缺少客观部分（run=%s job=%s）："
                         "这次会退化成不带等级与气象原文的格式", run_id, job.id)
+
+        # ★ 客观部分前置：一句事实 + 「农事建议：」+ 模型建议。
+        #   链接**不进正文**，只随存档留下（`_archive` 的 source_url）。
+        # ★ 顺序很重要：**先拼、再存档**。原先存档的是"模型正文"，翻开存档
+        #   看不到当天天气与预警原文 —— 那正是事后核对最需要的部分。
+        title = str(meta.get("title") or job.title or job.id)
+        text = compose_notice_text(str(meta.get("preamble") or ""), text)
+
         path = self._archive(job, text, source_url=str(meta.get("url") or ""))
         st.last_status = "delivered"
         st.last_note = f"已推送；存档 {path.name if path else '（未写成）'}"
         self._dirty = True
         self.save_state()
-        # ★ 客观部分前置：一句事实 + 「农事建议：」+ 模型建议。
-        #   链接**不进正文**，只随存档留下（`_archive` 的 source_url）。
-        title = str(meta.get("title") or job.title or job.id)
-        text = compose_notice_text(str(meta.get("preamble") or ""), text)
         self._emit({"type": "notice", "job": job.id, "run_id": run_id,
                     "title": title, "text": text,
                     "path": str(path) if path else ""})

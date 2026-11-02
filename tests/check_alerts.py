@@ -189,6 +189,22 @@ def section_detail(c: Checker) -> None:
     c.check("★ 单个乡镇也去掉，但保住句首的时效",
             "城关镇" not in out2 and out2.startswith("某县预计未来6小时内"), out2)
 
+    # ★ 地名重复：描述里已经出现地名时不再前缀
+    dup = ("塔什库尔干县气象台发布大风蓝色预警信号："
+           "预计未来24小时内塔什库尔干县各地将出现6级大风。")
+    out3 = alarms.clean_brief(dup, "塔什库尔干县")
+    c.check("★ 描述里已含地名时不重复前缀",
+            out3.count("塔什库尔干县") == 1, out3)
+    c.check("反向：描述里没有地名时仍然补上",
+            alarms.clean_brief("某气象台发布大风蓝色预警信号：预计未来24小时内将出现6级大风。",
+                               "广昌县").startswith("广昌县"), "")
+
+    # ★ HTTP 头只能装 latin-1：UA 里写中文会让 requests 直接抛 UnicodeEncodeError
+    for mod_name, ua in (("alarms", alarms._UA), ("weather", __import__(
+            "core.weather", fromlist=["_UA"])._UA)):
+        bad = [v for v in ua.values() if not str(v).isascii()]
+        c.check(f"★ `{mod_name}` 的请求头是纯 ASCII（不能含中文）", not bad, str(bad))
+
     c.check("地名取最后一级（省/市/县 长串 → 县级）",
             alarms.short_area("广西壮族自治区桂林市全州县气象台") == "全州县",
             alarms.short_area("广西壮族自治区桂林市全州县气象台"))
