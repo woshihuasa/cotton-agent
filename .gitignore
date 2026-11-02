@@ -98,3 +98,5 @@ embedding_providers.json
 # ── 本地诊断脚本 ──
 _*probe*.py
 
+# 截图脚本的临时沙箱（tools/make_readme_shots.py）
+/.shot_sandbox/
