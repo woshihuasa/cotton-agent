@@ -103,15 +103,82 @@ sys.excepthook = _excepthook
 # ⚠️ excepthook 与日志已就位后，才导入 config（其模块顶层可能抛 PermissionError）
 from config import app_data_dir  # noqa: E402
 
+from PyQt6.QtCore import QLockFile  # noqa: E402
+from PyQt6.QtNetwork import QLocalServer, QLocalSocket  # noqa: E402
 from PyQt6.QtWidgets import QApplication  # noqa: E402
 
 from ui.main_window import CottonAgentWindow  # noqa: E402
 
+
+def _instance_key() -> str:
+    """单实例的管道名。用数据目录的哈希，不同安装互不干扰。"""
+    import hashlib
+    raw = str(app_data_dir()).lower().encode("utf-8", "replace")
+    return "cottonagent-" + hashlib.sha1(raw).hexdigest()[:12]
+
+
+def _wake_existing(key: str) -> bool:
+    """已有实例在跑：通知它把窗口亮出来，然后本进程退出。"""
+    sock = QLocalSocket()
+    sock.connectToServer(key)
+    if not sock.waitForConnected(800):
+        return False
+    sock.write(b"show")
+    sock.flush()
+    sock.waitForBytesWritten(800)
+    sock.disconnectFromServer()
+    return True
+
+
+def _claim_single_instance(key: str):
+    """抢单实例锁。抢到返回 (lock, server)，没抢到返回 (None, None)。
+
+    第二个进程拿不到锁，就把"有人点了图标"告诉第一个进程，然后自己退出 ——
+    否则会出现两个调度器各推一遍（`schedule/state.json` 是各进程各读一份，
+    挡不住同一时刻的双推）。
+    """
+    lock = QLockFile(str(Path(app_data_dir()) / "app.lock"))
+    lock.setStaleLockTime(30_000)
+    if not lock.tryLock(300):
+        return None, None
+    QLocalServer.removeServer(key)          # 清掉上次异常退出留下的套接字
+    server = QLocalServer()
+    server.listen(key)
+    return lock, server
+
+
 if __name__ == "__main__":
     log.info("应用启动...")
     app = QApplication(sys.argv)
+    # ★ 关窗口只隐藏（托盘常驻），所以不能让 Qt 在最后一个窗口关闭时退出
+    app.setQuitOnLastWindowClosed(False)
+
+    _key = _instance_key()
+    _lock, _server = _claim_single_instance(_key)
+    if _lock is None:
+        if _wake_existing(_key):
+            log.info("已有实例在运行，已唤起它的窗口。")
+            print("[Main] 程序已在运行，已切换到那个窗口。")
+        else:
+            log.warning("未能唤起已有实例（可能是它刚启动还没监听）。")
+            print("[Main] 程序已在运行，但没能唤起窗口。")
+        sys.exit(0)
+
     try:
         window = CottonAgentWindow()
+
+        def _on_second_launch() -> None:
+            """别的进程又来了一次：把窗口亮出来，顺手打开推送抽屉。"""
+            while _server.hasPendingConnections():
+                conn = _server.nextPendingConnection()
+                if conn is not None:
+                    conn.readAll()
+                    conn.disconnectFromServer()
+            window.showNormal()
+            window.raise_()
+            window.activateWindow()
+
+        _server.newConnection.connect(_on_second_launch)
         window.show()
         log.info("主窗口显示完成。")
         sys.exit(app.exec())

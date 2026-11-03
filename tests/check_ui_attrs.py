@@ -77,6 +77,8 @@ setSizePolicy setAlignment setMinimumHeight setMinimumWidth setContentsMargins
 blockSignals setSelectionMode setIconSize setIcon setStyleSheet
 setEditable setInsertPolicy view clear addItems lineEdit setCurrentText
 itemText currentText count setCheckable setChecked isChecked toggled
+showNormal activateWindow setContextMenu activated showMessage
+isSystemTrayAvailable setToolTip addAction setMenu
 """.split())
 
 

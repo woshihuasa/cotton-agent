@@ -1337,8 +1337,15 @@ class CottonAgentWindow(QMainWindow):
         # ★ 排在知识库检测之后：调度要用知识库，得先让它有机会准备好；
         #   而知识库是惰性取的（`kb_provider`），所以这时刻只是"大概率已就绪"。
         self._scheduler = None
+        #: 真退出（托盘菜单点退出）时置真；关窗口只隐藏，不停调度。
+        self._quitting = False
+        #: 首次隐藏到托盘时提示一次，之后不再打扰。
+        self._tray_hint_shown = False
+        self._tray = None
         self.schedule_push.connect(self._on_schedule_notice)
         QTimer.singleShot(5000, self._start_scheduler)
+        # 托盘要在启动后立刻有：关窗隐藏靠它叫得回来
+        self._setup_tray()
 
         # 更新下载完成后退出时拉起 updater.exe
         app = QApplication.instance()
@@ -1476,6 +1483,8 @@ class CottonAgentWindow(QMainWindow):
 
         self._refresh_notifications()
         self._set_status("收到一条新推送")
+        # 窗口藏起来时抽屉与浮条都看不见，必须用系统通知兜住
+        self._notify_when_hidden(str(payload.get("title") or "推送"), text)
         # 抽屉没开就弹一下浮条；开着就不用弹，用户已经在看了
         self._maybe_show_toast()
 
@@ -2433,12 +2442,102 @@ class CottonAgentWindow(QMainWindow):
     # ── 窗口关闭 ─────────────────────────────────────────
 
     def closeEvent(self, event) -> None:
-        """关闭前停止定时器与调度线程。"""
-        self._update_timer.stop()
+        """关窗口默认**只是隐藏**，调度线程继续跑（定时推送靠它）。
+
+        三种情况会真的退出：
+          · 托盘菜单点了「退出」（`_quitting` 为真）；
+          · 系统没有托盘（隐藏了就叫不回来，等于把程序关死）；
+          · 托盘创建失败。
+        """
+        import os
+
+        from ui.tray import tray_available
+
+        # 有人就是不想常驻：`TRAY_ON_CLOSE=0` 时关窗即退出
+        allowed = str(os.getenv("TRAY_ON_CLOSE", "1")).strip().lower() \
+            not in ("0", "false", "no", "off")
+        keep_running = (not self._quitting) and self._tray is not None \
+            and allowed and tray_available()
+        if keep_running:
+            event.ignore()
+            self.hide()
+            log.info("窗口已隐藏，进程继续在托盘运行")
+            if not self._tray_hint_shown:
+                self._tray_hint_shown = True
+                self._tray.notify(
+                    "仍在后台运行",
+                    "定时推送会继续。要完全退出，请右键任务栏图标选「退出」。",
+                    ms=8000)
+            return
+
+        self._shutdown()
+        super().closeEvent(event)
+        # ★ 主循环设了 setQuitOnLastWindowClosed(False)（为了关窗隐藏不退出），
+        #   所以真正退出时得自己叫停，否则窗口关了进程还在。
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()
+
+    def _shutdown(self) -> None:
+        """真正退出的清理：停计时器、停调度线程、收掉托盘图标。"""
+        self._quitting = True
+        try:
+            self._update_timer.stop()
+        except Exception:                                    # noqa: BLE001
+            pass
         sched = getattr(self, "_scheduler", None)
         if sched is not None:
             try:
                 sched.stop()
+                log.info("定时触发层已停止")
+            except Exception as e:                           # noqa: BLE001
+                log.warning("停止定时触发层失败（忽略）：%s", e)
+        tray = getattr(self, "_tray", None)
+        if tray is not None:
+            try:
+                tray.hide()
             except Exception:                                # noqa: BLE001
                 pass
-        super().closeEvent(event)
+
+    # ── 托盘：关窗不退出时，它是唯一的入口 ──────────────
+
+    def _setup_tray(self) -> None:
+        """装托盘图标。系统没有托盘就跳过，关窗行为保持"真退出"。"""
+        from ui.tray import AppTray, tray_available
+
+        if not tray_available():
+            log.info("系统没有托盘，关窗口仍按退出处理")
+            return
+        try:
+            self._tray = AppTray(self)
+        except Exception as e:                               # noqa: BLE001
+            log.warning("托盘创建失败（关窗口仍按退出处理）：%s", e)
+            self._tray = None
+            return
+        self._tray.show_requested.connect(self._show_from_tray)
+        self._tray.settings_requested.connect(self._open_schedule_dialog)
+        self._tray.quit_requested.connect(self._quit_from_tray)
+        self._tray.show()
+        log.info("托盘图标已就绪")
+
+    def _show_from_tray(self) -> None:
+        """从托盘唤起窗口：恢复、置前、抢焦点。"""
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def _quit_from_tray(self) -> None:
+        """托盘菜单的「退出」：走真正的关闭路径。"""
+        self._quitting = True
+        self.close()
+
+    def _notify_when_hidden(self, title: str, body: str) -> None:
+        """窗口不可见时，用系统通知兜住这条推送。
+
+        ★ 这是"关窗不退出"能成立的前提：否则推送照常进收件箱，用户屏幕上
+          什么也看不到，会以为程序坏了。
+        """
+        if self.isVisible() or self._tray is None:
+            return
+        first = (body or "").strip().splitlines()[0][:80] if body else ""
+        self._tray.notify(title or "推送", first)
