@@ -234,11 +234,16 @@ def section_single_instance(c: Checker) -> None:
     c.check("管道名带固定前缀", key.startswith("cottonagent-"), key)
     c.check("同一安装的管道名稳定", key == m._instance_key())
 
-    lock_a, server_a = m._claim_single_instance(key)
-    c.check("★ 第一个进程能抢到锁", lock_a is not None and server_a is not None)
-    lock_b, server_b = m._claim_single_instance(key)
-    c.check("★ 第二个进程抢不到锁（这就是单实例的依据）",
-            lock_b is None and server_b is None, f"{lock_b} / {server_b}")
+    lock_a, server_a, verdict_a = m._claim_single_instance(key)
+    c.check("★ 第一个进程能抢到锁",
+            lock_a is not None and server_a is not None and verdict_a == "ok",
+            verdict_a)
+    lock_b, server_b, verdict_b = m._claim_single_instance(key)
+    c.check("★ 第二个进程被判为 blocked（这就是单实例的依据）",
+            lock_b is None and verdict_b == "blocked", verdict_b)
+    c.check("★ 锁失败不能一律当「已有实例」：不可写时要降级放行",
+            'if _verdict == "blocked"' in (ROOT / "main.py").read_text(
+                encoding="utf-8"), "")
     try:
         if server_a is not None:
             server_a.close()

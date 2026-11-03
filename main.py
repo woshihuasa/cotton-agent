@@ -131,20 +131,29 @@ def _wake_existing(key: str) -> bool:
 
 
 def _claim_single_instance(key: str):
-    """抢单实例锁。抢到返回 (lock, server)，没抢到返回 (None, None)。
+    """抢单实例锁。返回 `(lock, server, verdict)`，verdict 有三种：
 
-    第二个进程拿不到锁，就把"有人点了图标"告诉第一个进程，然后自己退出 ——
-    否则会出现两个调度器各推一遍（`schedule/state.json` 是各进程各读一份，
-    挡不住同一时刻的双推）。
+        `ok`        抢到了，正常启动，并监听"有人又点了一次图标"
+        `blocked`   锁被别人占着 —— 这是**真·第二个实例**，唤起对方后自己退出
+        `degraded`  锁文件建不出来（数据目录不可写）—— **照样启动**，只是没有单实例保护
+
+    ★ `degraded` 这一档是必须的：早先的写法把"锁失败"一律当成"已有实例"，
+      于是数据目录不可写的机器上程序一启动就自己退出，用户看到的是"点了没反应"。
+      宁可退化成多开，也不能打不开。
     """
     lock = QLockFile(str(Path(app_data_dir()) / "app.lock"))
     lock.setStaleLockTime(30_000)
     if not lock.tryLock(300):
-        return None, None
+        err = lock.error()
+        perm = getattr(QLockFile.LockError, "PermissionError", None)
+        if perm is not None and err == perm:
+            log.warning("锁文件建不出来（数据目录不可写），本次启动不启用单实例保护")
+            return None, None, "degraded"
+        return None, None, "blocked"
     QLocalServer.removeServer(key)          # 清掉上次异常退出留下的套接字
     server = QLocalServer()
     server.listen(key)
-    return lock, server
+    return lock, server, "ok"
 
 
 if __name__ == "__main__":
@@ -154,8 +163,8 @@ if __name__ == "__main__":
     app.setQuitOnLastWindowClosed(False)
 
     _key = _instance_key()
-    _lock, _server = _claim_single_instance(_key)
-    if _lock is None:
+    _lock, _server, _verdict = _claim_single_instance(_key)
+    if _verdict == "blocked":
         if _wake_existing(_key):
             log.info("已有实例在运行，已唤起它的窗口。")
             print("[Main] 程序已在运行，已切换到那个窗口。")
