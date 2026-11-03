@@ -103,6 +103,21 @@ python tests/run_all.py           # 跑评测，产出 eval_report.md
 
 改代码只有一条硬规矩：新增工具要同时更新契约、实现与能力声明三处。漏一处的失败方向是更严，不会静默通过。新增或修改功能请顺手补守卫。
 
+慢在哪、错在哪，可以打开埋点看。默认关闭，打开后每次问答与每条推送的每一步都会记到本地，不联网：
+
+```bash
+# PowerShell：先设环境变量再启动
+$env:OBSERVABILITY_ENABLED = "1"
+python main.py
+
+# 查看
+python tools/traces.py list            # 最近若干条
+python tools/traces.py show <trace_id> # 一条链路的时间线
+python tools/traces.py slow            # 最慢的步骤，按名字归类
+```
+
+只记模型名、token 数、耗时与成败，正文需要另开开关才会记录。
+
 截图由 `python tools/make_readme_shots.py` 离屏渲染，界面改了重跑一次即可。
 
 ## 限制

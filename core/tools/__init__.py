@@ -83,6 +83,7 @@ def execute_tool_result(name: str, args: dict) -> ToolResult:
     实现既可返回 `ToolResult`（如 `plot_trend`），也可返回裸 `str`
     （其余工具），此处统一包装。
     """
+    from core import observability as obs
     handler = TOOL_HANDLERS.get(name)
     if handler is None:
         # ★ 防线一：先试**别名/归一化**（`websearch` → `web_search`），
@@ -105,5 +106,7 @@ def execute_tool_result(name: str, args: dict) -> ToolResult:
         log.warning("工具调用被能力闸门拒绝: %s — %s", name, decision.reason)
         return ToolResult(text=decision.as_error_text(name))
 
-    out = handler(args or {})
+    # ★ 这里包一层埋点：只记工具名与成败，**不记参数**（参数里可能有用户数据）
+    with obs.span(f"tool:{name}", kind="tool", tool=name):
+        out = handler(args or {})
     return out if isinstance(out, ToolResult) else ToolResult(text=str(out))

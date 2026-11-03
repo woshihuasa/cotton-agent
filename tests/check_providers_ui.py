@@ -28,6 +28,13 @@ ROOT = Path(__file__).resolve().parent.parent
 os.chdir(ROOT)
 sys.path.insert(0, str(ROOT))
 
+# ★ 隔离数据目录：这条守卫里有一条断言是「沙箱没有缓存 → 候选为空」。
+#   不隔离的话，它读的是本机真实缓存（`model_cache.json`），跑过一次真实取数
+#   之后断言就会红 —— 这不是代码坏了，是守卫依赖了环境。
+import tempfile as _tempfile
+_SANDBOX = Path(_tempfile.mkdtemp(prefix="cotton_test_providers_ui_"))
+os.environ["COTTON_AGENT_DATA_DIR"] = str(_SANDBOX)
+
 # ⚠️ 必须在 import PyQt6 之前设置 —— 否则 Qt 会尝试连接显示服务并失败
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -678,6 +685,8 @@ def main() -> int:
             provider_editor.KIND_SPECS["embedding"].footnote == "",
             repr(provider_editor.KIND_SPECS["embedding"].footnote))
 
+    import shutil as _shutil
+    _shutil.rmtree(_SANDBOX, ignore_errors=True)
     print()
     print("=" * 78)
     print(f"模型提供商界面守卫: {c.passed}/{c.total} 通过"
