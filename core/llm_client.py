@@ -235,13 +235,18 @@ class LLMClient:
         Returns:
             模型返回的完整文本内容；若发生异常则返回友好的错误提示字符串。
         """
+        from core import observability as obs
         try:
-            response = self._client.chat.completions.create(
-                model=self._model,
-                messages=messages,
-                **self._sampling_kwargs(),
-            )
-            self._record_usage(getattr(response, "usage", None))
+            with obs.generation(self._model, provider="llm_client") as _g:
+                response = self._client.chat.completions.create(
+                    model=self._model,
+                    messages=messages,
+                    **self._sampling_kwargs(),
+                )
+                self._record_usage(getattr(response, "usage", None))
+                _u = getattr(response, "usage", None)
+                _g.usage(prompt=getattr(_u, "prompt_tokens", 0) or 0,
+                         completion=getattr(_u, "completion_tokens", 0) or 0)
             return response.choices[0].message.content
 
         except APIError as e:
@@ -269,16 +274,22 @@ class LLMClient:
             response.choices[0].message, 可能含 content / tool_calls;
             异常时返回 None。
         """
+        from core import observability as obs
         model = model_name or self._model
         try:
-            response = self._client.chat.completions.create(
-                model=model,
-                messages=messages,
-                tools=tools,
-                stream=False,
-                **self._sampling_kwargs(),
-            )
-            self._record_usage(getattr(response, "usage", None))
+            with obs.generation(model, provider="llm_client",
+                                tools=len(tools or [])) as _g:
+                response = self._client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    tools=tools,
+                    stream=False,
+                    **self._sampling_kwargs(),
+                )
+                self._record_usage(getattr(response, "usage", None))
+                _u = getattr(response, "usage", None)
+                _g.usage(prompt=getattr(_u, "prompt_tokens", 0) or 0,
+                         completion=getattr(_u, "completion_tokens", 0) or 0)
             return response.choices[0].message
         except APIError as e:
             print(f"[LLMClient] chat_with_tools API 失败: {e}")

@@ -680,14 +680,19 @@ class KnowledgeBase:
               ② 同主题的多个版本**挤占 top-k 名额**，把其他有用内容挤出去。
             加上原来的实现**只返回正文、丢掉 source**，模型连"这是哪一年的"都看不到。
         """
+        from core import observability as obs
+
         # ① 召回：`prefer_latest` 时多取一些候选，给"按主题去重"留出空间
         want = max(k, 1)
         pool_k = want * 4 if prefer_latest else want
-        if AppConfig.RERANK_ENABLED and AppConfig.RERANK_RECALL_K > want:
-            pool = self._vector_store.similarity_search(
-                query, k=max(AppConfig.RERANK_RECALL_K, pool_k))
-        else:
-            pool = self._vector_store.similarity_search(query, k=pool_k)
+        with obs.span("retrieval", kind="retrieval", top_k=want) as _sp:
+            if AppConfig.RERANK_ENABLED and AppConfig.RERANK_RECALL_K > want:
+                pool = self._vector_store.similarity_search(
+                    query, k=max(AppConfig.RERANK_RECALL_K, pool_k))
+            else:
+                pool = self._vector_store.similarity_search(query, k=pool_k)
+            _sp.set(recall=len(pool))
+            _sp.text("query", query)
 
         if not pool:
             print("[KnowledgeBase] 未检索到相关文档。")
@@ -695,7 +700,8 @@ class KnowledgeBase:
 
         # ② 精排（仅在候选多于 k 且开了 rerank 时才有意义）
         if AppConfig.RERANK_ENABLED and AppConfig.RERANK_RECALL_K > want:
-            docs = self._rerank_docs(query, pool, top_n=pool_k)
+            with obs.span("rerank", kind="rerank", candidates=len(pool)):
+                docs = self._rerank_docs(query, pool, top_n=pool_k)
         else:
             docs = pool
 

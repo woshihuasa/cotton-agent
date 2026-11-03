@@ -922,6 +922,14 @@ class Engine:
 
         `resume=True` 时从断点恢复：**已完成的节点直接取断点里的产出，不重新执行**。
         """
+        from core import observability as obs
+        # ★ 整条工作流一条 trace，节点 span 挂在下面。`run()` 通常在 TaskRunner
+        #   的子线程里被调用，所以这里自己起根节点（跨线程不继承上下文）。
+        with obs.trace(f"workflow:{self.wf.id}"):
+            return self._run_inner(inputs, run_id=run_id, resume=resume)
+
+    def _run_inner(self, inputs: dict[str, Any] | None, *, run_id: str,
+                   resume: bool) -> Run:
         run = Run(
             run_id=run_id or store.new_run_id(self.wf.id),
             workflow_id=self.wf.id,
@@ -1094,11 +1102,20 @@ class Engine:
         parallel = [n for n in batch if n.type not in SERIAL_TYPES]
 
         if parallel:
+            # ★ 埋点的父句柄要**显式带进子线程**：线程局部变量不会跟着线程走，
+            #   不传的话并行节点的 span 会变成互不相干的根节点，时间线就散了。
+            from core import observability as obs
+            _parent = obs.current()
+
+            def _run_one(node: Node) -> NodeOutcome:
+                obs.adopt(_parent)
+                return self._execute_with_retry(node, run, ctx)
+
             with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
                 futures: dict[Future, Node] = {}
                 for n in parallel:
                     self._mark_running(n, run)
-                    futures[pool.submit(self._execute_with_retry, n, run, ctx)] = n
+                    futures[pool.submit(_run_one, n)] = n
                 for fut in futures:
                     node = futures[fut]
                     try:
@@ -1126,7 +1143,14 @@ class Engine:
             step = run.step(node.id)
             step.attempts += 1
             try:
-                outcome = self._call_with_timeout(fn, node, ctx, node.timeout_s)
+                from core import observability as obs
+                # ★ 节点级埋点：记节点 id、类型、第几次尝试与成败，不记节点产出
+                with obs.span(f"node:{node.id}", kind="node",
+                              type=node.type, attempt=i + 1) as _sp:
+                    outcome = self._call_with_timeout(
+                        fn, node, ctx, node.timeout_s)
+                    if not outcome.ok:
+                        _sp.set(error=str(outcome.error or "")[:200])
             except NotSupportedError as e:
                 return NodeOutcome(ok=False, error=str(e))
             except BaseException as e:                       # noqa: BLE001

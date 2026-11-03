@@ -1415,6 +1415,11 @@ class Scheduler:
             with self._lock:
                 self._inflight.pop(job.id, None)
 
+        from core import observability as obs
+        with obs.trace(f"push:{job.id}", run_id=run_id):
+            self._watch_inner(job, run_id, run)
+
+    def _watch_inner(self, job: Job, run_id: str, run: Any) -> None:
         st = self.state_of(job.id)
         if run is None:
             st.last_status = "failed"
