@@ -27,6 +27,7 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QDialog,
     QFormLayout,
@@ -43,7 +44,11 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+import logging
+
 from core.config_manager import ConfigManager
+
+log = logging.getLogger("Settings")
 from ui.toggle import ToggleSwitch
 
 # ── 样式 ───────────────────────────────────────────
@@ -623,6 +628,27 @@ class SettingsDialog(QDialog):
             err.setWordWrap(True)
             err.setObjectName("formLabel")
 
+        # ── 后台运行：开机自启（默认关，用户勾了才写注册表）──
+        boot_group = QGroupBox("后台运行")
+        boot_form = QFormLayout(boot_group)
+        boot_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        self._autostart = QCheckBox("开机时自动启动")
+        self._autostart.setChecked(False)
+        from core import autostart as _autostart
+        _why = _autostart.unavailable_reason()
+        if _why:
+            self._autostart.setEnabled(False)
+            self._autostart.setToolTip(_why)
+        else:
+            self._autostart.setChecked(_autostart.enabled())
+        boot_form.addRow(QLabel(""), self._autostart)
+        boot_hint = QLabel(
+            "默认关闭。勾选后才会在注册表里登记一条启动项，取消勾选会删掉它。"
+            "关掉窗口时代码会留在托盘继续跑，这一项决定重启电脑后它是否自己起来。")
+        boot_hint.setObjectName("formLabel")
+        boot_hint.setWordWrap(True)
+        boot_form.addRow(QLabel(""), boot_hint)
+
         pages = [
             ("模型", self._make_page(prov_group)),
             ("Embedding", self._make_page(emb_group)),
@@ -630,9 +656,10 @@ class SettingsDialog(QDialog):
             ("Web 服务", self._make_page(web_group)),
         ]
         if self._schedule_panel is not None:
-            pages.append(("推送", self._make_page(self._schedule_panel)))
+            pages.append(("推送",
+                          self._make_page(self._schedule_panel, boot_group)))
         else:
-            pages.append(("推送", self._make_page(err)))
+            pages.append(("推送", self._make_page(err, boot_group)))
 
         for title, page in pages:
             self._nav.addItem(title)
@@ -861,4 +888,18 @@ class SettingsDialog(QDialog):
             "WEB_SEARCH_DEEPSEEK_ON": "1" if self._deepseek_on.isChecked() else "0",
             "DEEPSEEK_SEARCH_API_KEY": self._ds_search_key.text().strip(),
         })
+
+        # 开机自启：注册表是唯一真相，不进 .env。
+        # ★ 只在状态真的变了时写，避免每次点保存都重写一遍注册表。
+        try:
+            from core import autostart as _autostart
+            want = bool(self._autostart.isChecked())
+            if not _autostart.unavailable_reason() and want != _autostart.enabled():
+                ok, msg = _autostart.set_enabled(want)
+                if not ok:
+                    QMessageBox.warning(self, "开机自启没设置成功", msg)
+                    return
+        except Exception as e:                                # noqa: BLE001
+            # 自启写不进去不该拦住其他设置保存
+            log.warning("处理开机自启失败（其余设置已保存）：%s", e)
         self.accept()
