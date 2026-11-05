@@ -874,7 +874,60 @@ class RAGEngine:
 
     # ------------------- 查询重写 ---------------------------------
 
+    #: 模型没执行"改写"、而是跑去"回答"或"拒答"时的开头词。
+    #:
+    #: ★ 为什么要有这一组而不是一个"抱歉"：中文助手的拒答模板不止一种写法，
+    #:   "对不起我无法…" 与 "很抱歉…" 都不以"抱歉"开头，用单前缀会漏。
+    _REWRITE_REFUSAL_PREFIXES: tuple[str, ...] = (
+        "抱歉", "对不起", "很抱歉", "我无法", "无法回答", "我不能", "作为一个")
+
+    #: 答案式开头词：这是"回答"的写法，不是"检索查询"的写法。
+    #:
+    #: ★ 误判的代价是不改写（用原问题检索），几乎无损；漏判的代价是拿一段答案
+    #:   去检索，召回必然跑偏且不报错。所以这条规则宁可严一点。
+    _REWRITE_ANSWER_OPENERS: tuple[str, ...] = (
+        "可以", "建议", "应该", "应当", "需要", "不要", "首先要", "首先",
+        "其次", "因为", "所以", "一般来说", "注意", "请", "答案")
+
+    @staticmethod
+    def _rewrite_looks_valid(question: str, rewritten: str) -> tuple[bool, str]:
+        """判断模型的输出到底是"改写后的问题"还是"一段回答/道歉"。
+
+        Returns:
+            `(是否可用, 不可用的原因)`。原因只进日志，不给用户看。
+
+        【为什么要判断，而不只是看开头】
+          改写请求把整段对话历史一起发过去，模型很容易顺着历史继续当"助手"：
+          本该输出一句独立的问题，它却答了、或者拒答了。前者会让检索查询变成
+          一段答案，后者会变成一句道歉 —— 两种都会把召回带偏，而且**不报错**。
+          开头词只能抓住拒答那一类，所以这里再补三条形状约束：
+            ① 有多行 → 像是带了额外解释；
+            ② 出现两个以上句号 → 像是一段陈述而不是一个问句；
+            ③ 长度明显超过原问题 → 答案通常远长于问题；
+            ④ 以答案口吻开头（"可以""建议""应该"…）→ 那是在回答，不是在改写。
+        """
+        text = (rewritten or "").strip()
+        if not text:
+            return False, "模型返回空"
+        if text.startswith(RAGEngine._REWRITE_REFUSAL_PREFIXES):
+            return False, "模型在拒答而不是改写"
+        if text.startswith(RAGEngine._REWRITE_ANSWER_OPENERS):
+            return False, "输出以答案口吻开头，像在回答而不是改写"
+        if "\n" in text:
+            return False, "输出含换行，像是解释而不是一句问题"
+        if text.count("。") >= 2:
+            return False, f"输出含 {text.count('。')} 个句号，像是一段回答"
+        limit = max(len(question) * 3, len(question) + 60)
+        if len(text) > limit:
+            return False, f"输出长 {len(text)} 字，超过上限 {limit} 字"
+        return True, ""
+
     def _rewrite_query(self, question: str) -> str:
+        """把带指代的口语问句还原成一句独立的检索查询。
+
+        任何一步判不出"这是改写"，都**退回原问题**：拿一句道歉或一段答案去检索，
+        比不改写更糟，而且不会有任何报错提示。
+        """
         session = self._current_session()
         if not session.conversation_store:
             return question
@@ -883,9 +936,14 @@ class RAGEngine:
             [{"role": "system", "content": REWRITE_SYSTEM_PROMPT}]
             + recent + [{"role": "user", "content": question}]
         )
-        if rewritten.startswith("抱歉"):
+        ok, reason = self._rewrite_looks_valid(question, rewritten)
+        if not ok:
+            # ★ 这里必须留一条日志。`generate_response` 在 API 失败时会把
+            #   "抱歉，AI 服务暂时不可用…" 当成**内容**返回（见 core/llm_client.py），
+            #   如果不记，事后无法区分"模型跑偏"与"接口挂了"。
+            log.warning("查询改写被丢弃（%s），改用原问题检索", reason)
             return question
-        return rewritten.strip()
+        return rewritten.strip()[:400]
 
     # ------------------- 原生工具 Schema --------------------------
 
