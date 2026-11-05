@@ -56,11 +56,26 @@ def section_icon(c: Checker) -> None:
     app = QApplication.instance() or QApplication([])
     from ui.tray import ICON_SIZES, tray_icon
 
+    import ui.tray as tray_mod
+
     icon = tray_icon()
     sizes = {(s.width(), s.height()) for s in icon.availableSizes()}
-    c.check("★ 每个尺寸各画一份（不是画一张再缩放）",
-            sizes == {(s, s) for s in ICON_SIZES}, str(sorted(sizes)))
     c.check("图标非空", not icon.isNull())
+    c.check("★ 多尺寸齐全（至少 4 档，系统才能按 DPI 挑）",
+            len(sizes) >= 4, str(sorted(sizes)))
+    c.check("★ 用上了设计稿那套图标（含 256 档，现画的那套没有）",
+            (256, 256) in sizes, str(sorted(sizes)))
+
+    # 生成物缺失时必须退回现画，而不是给一个空图标
+    real_path = tray_mod.app_icon_path
+    tray_mod.app_icon_path = lambda: None
+    try:
+        fallback = tray_icon()
+        fb = {(s.width(), s.height()) for s in fallback.availableSizes()}
+        c.check("★ 图标文件缺失时退回现画的四档", fb == {(s, s) for s in ICON_SIZES},
+                str(sorted(fb)))
+    finally:
+        tray_mod.app_icon_path = real_path
 
     pm16 = icon.pixmap(16, 16)
     c.check("16 像素可用", pm16.width() == 16 and not pm16.isNull())

@@ -162,6 +162,14 @@ if __name__ == "__main__":
     # ★ 关窗口只隐藏（托盘常驻），所以不能让 Qt 在最后一个窗口关闭时退出
     app.setQuitOnLastWindowClosed(False)
 
+    # 应用图标：任务栏、Alt-Tab、窗口标题栏都读它
+    from PyQt6.QtGui import QIcon
+
+    from config import resource_path
+    _icon = resource_path("ui/icons/app.ico")
+    if _icon.exists():
+        app.setWindowIcon(QIcon(str(_icon)))
+
     _key = _instance_key()
     _lock, _server, _verdict = _claim_single_instance(_key)
     if _verdict == "blocked":

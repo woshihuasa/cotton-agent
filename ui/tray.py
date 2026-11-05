@@ -65,8 +65,28 @@ def _draw_one(size: int) -> QPixmap:
     return pm
 
 
+def app_icon_path():
+    """打包内 / 源码里的应用图标路径（取不到返回 None）。"""
+    from config import resource_path
+    for name in ("ui/icons/app.ico", "ui/icons/app.png"):
+        p = resource_path(name)
+        if p.exists():
+            return p
+    return None
+
+
 def tray_icon() -> QIcon:
-    """多尺寸图标。每个尺寸一份位图，交给系统按 DPI 自己挑。"""
+    """多尺寸图标。
+
+    优先用 `tools/make_app_icon.py` 生成的那套（大尺寸线稿、小尺寸简化图形），
+    它是设计稿的正身；生成物缺失时才退回**现画**的三团棉铃 —— 保证任何情况下
+    托盘都有图标，而不是一片空白。
+    """
+    path = app_icon_path()
+    if path is not None:
+        icon = QIcon(str(path))
+        if not icon.isNull() and icon.availableSizes():
+            return icon
     icon = QIcon()
     for s in ICON_SIZES:
         icon.addPixmap(_draw_one(s))
