@@ -260,6 +260,18 @@ class _ModelFetch(QThread):
         self.done.emit(bool(ok), str(msg), list(ids or []))
 
 
+def _normalize_url_for_save(raw: str) -> str:
+    """保存前把接口地址规范化（规则见 `core.providers.normalize_base_url`）。
+
+    ★ 放在保存时做，而不是边打字边改用户正在敲的字：输入过程中只给提示，
+      落库前才统一纠正，否则会让人以为键盘有问题。
+    """
+    from core.providers import normalize_base_url
+
+    fixed, _note = normalize_base_url(raw)
+    return fixed
+
+
 class ModelCombo(QComboBox):
     """**只能从下拉里选**的模型控件：候选来自缓存，缺了就按需拉取。
 
@@ -409,7 +421,9 @@ class ProviderEditDialog(QDialog):
         form.addRow(QLabel("供应商名称:"), self._label)
 
         self._url = QLineEdit(spec.get("base_url", ""))
-        self._url.setPlaceholderText("https://gateway.example/v1")
+        # ★ 占位符要给出"填到哪为止"的例子，而不是一个抽象域名。
+        #   这一栏收的是 base URL，程序会在后面自动接 /chat/completions。
+        self._url.setPlaceholderText("https://api.example.com/v1")
         if self.builtin:
             self._url.setEnabled(False)
             self._url.setToolTip(
@@ -422,10 +436,25 @@ class ProviderEditDialog(QDialog):
         self._btn_test.setObjectName("cardBtn")
         self._btn_test.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_test.clicked.connect(self._on_test)
-        # 新建时还没落库，测不了 —— 只有已存在的提供商才能测
-        self._btn_test.setEnabled(not is_new)
+        # ★ 新建时也要能测：用**当前填的地址与密钥**打一次 `GET /models`。
+        #   原来这里是 `setEnabled(not is_new)`，于是"新建服务商"这条路上
+        #   按钮永远是灰的 —— 而新建恰恰是最需要先验证一下的时候。
+        self._btn_test.setToolTip(
+            "用上面填的接口地址与密钥试一次（只拉模型清单，不消耗生成 token）")
         url_row.addWidget(self._btn_test)
         form.addRow(QLabel("接口地址:"), url_row)
+
+        # ★ 实时预览：把"实际会请求哪个地址"直接拼出来给用户看。
+        #   这一栏最容易填错的原因是"base URL"是个抽象概念 —— 用户看到
+        #   `/v1/chat/completions` 这个具体结果，就知道自己该填到哪。
+        self._url_hint = QLabel()
+        self._url_hint.setWordWrap(True)
+        self._url_hint.setTextFormat(Qt.TextFormat.PlainText)
+        self._url_hint.setStyleSheet("color:#8A8A8E; font-size:11px;")
+        self._url.addTextChangedListener if False else None
+        self._url.textChanged.connect(self._update_url_hint)
+        self._update_url_hint()          # ★ 构造时先填一次规则文案（信号不会自己触发）
+        form.addRow(QLabel(""), self._url_hint)
 
         # ★ 默认模型：**可选可编辑下拉**，清单来自缓存（`core/model_cache`），
         #   所以**打开对话框就有候选可点**，不必先点「测试连接」。
@@ -490,11 +519,35 @@ class ProviderEditDialog(QDialog):
         return {
             "name": self._id.text().strip(),
             "label": self._label.text().strip(),
-            "base_url": self._url.text().strip(),
+            # ★ 保存前统一纠正：补协议头、去尾斜杠、去掉误贴进来的
+            #   `/chat/completions`。否则请求会打到
+            #   `/chat/completions/chat/completions`，报错看着像"地址不通"。
+            "base_url": _normalize_url_for_save(self._url.text()),
             "default_model": self._model.currentText().strip(),
             "api_key": self._key.text(),          # 空串 = 不修改
             "make_default": self._make_default.isChecked(),
         }
+
+    def _update_url_hint(self, _text: str = "") -> None:
+        """按当前地址刷新提示：一句规则，加一行"实际请求地址"。"""
+        from core.providers import endpoint_preview, normalize_base_url
+
+        raw = self._url.text()
+        if not raw.strip():
+            self._url_hint.setText(
+                "填服务商文档里的 base URL，也就是程序会在后面自动接 "
+                "/chat/completions 的那一截，通常以 /v1 结尾。")
+            return
+        fixed, note = normalize_base_url(raw)
+        preview = endpoint_preview(raw)
+        parts: list[str] = []
+        if note:
+            parts.append(f"保存时会自动纠正：{note}。")
+        if preview:
+            parts.append(f"实际请求：{preview}")
+        if fixed.rstrip("/").count("/") < 3:
+            parts.append("地址里没有 /v1 这类版本段；如果该服务要求带版本号，请补上。")
+        self._url_hint.setText(" ".join(parts))
 
     def _on_test(self) -> None:
         """测试连接 —— 调 `GET /models`（**不消耗生成 token**），并区分四类失败。
@@ -502,14 +555,33 @@ class ProviderEditDialog(QDialog):
         ★ 顺便把模型清单填进下拉框，并检查用户填的默认模型**在不在清单里**：
           名字抄错一个字符时，错误原本要到第一次生成才暴露，而现在当场就能看见。
         """
-        name = self.spec.get("name", "")
-        if not name:
+        name = str(self.values().get("name") or "")
+        url = self._url.text().strip()
+        key = self._key.text()
+        saved = bool(name) and credentials.has_key(
+            self._ks.backend.key_name(name))
+
+        # 测哪个：优先"刚填的地址与密钥"，其次"已保存的配置"。
+        # ★ 顺序不能反 —— 用户改完地址想立刻验证，测的必须是**正在填的这份**，
+        #   否则测通了、保存进去仍是错的（两份地图的老问题）。
+        run = None
+        if url and key:
+            def run() -> tuple[bool, str, list[str]]:   # noqa: F811
+                return self._ks.backend.list_models_at(url, key)
+        elif name and saved:
+            def run() -> tuple[bool, str, list[str]]:   # noqa: F811
+                return self._ks.backend.list_models(name)
+        if run is None:
+            self._test_msg.setText(
+                "✗ 先填接口地址与 API 密钥，再点测试连接")
+            self._test_msg.setStyleSheet(f"font-size:11px; color:{COLOR_OFF};")
             return
+
         self._btn_test.setEnabled(False)          # 进行中锁定，防重复点击
         self._test_msg.setText("正在测试连接…")
         self._test_msg.setStyleSheet("font-size:11px; color:#8a919b;")
         try:
-            ok, detail, ids = self._ks.backend.list_models(name)
+            ok, detail, ids = run()
         finally:
             self._btn_test.setEnabled(True)
 

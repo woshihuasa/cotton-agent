@@ -76,6 +76,54 @@ def main() -> int:
     c = Checker()
 
     # ------------------------------------------------------------------
+    c.section("第 0 节：★ 接口地址怎么填 —— 提示、自动纠正、测试连接")
+    # ------------------------------------------------------------------
+    import core.providers as _P
+
+    dlg_new = ProviderEditDialog(kind="llm", is_new=True,
+                                 spec={"name": "opencode-go", "label": "opencode go"})
+    c.check("★ 新建时就有填写规则提示", "base URL" in dlg_new._url_hint.text(),
+            dlg_new._url_hint.text()[:40])
+    c.check("★ 新建时「测试连接」可点（原来对新建项是禁用）",
+            dlg_new._btn_test.isEnabled(), "")
+
+    dlg_new._url.setText("api.example.com/v1/chat/completions")
+    hint = dlg_new._url_hint.text()
+    c.check("★ 贴了完整请求地址时，提示说明会被纠正", "自动纠正" in hint, hint)
+    c.check("★ 提示里给出实际会请求的地址",
+            "实际请求" in hint and "/v1/chat/completions" in hint, hint)
+    c.check("★ 保存时规范化为 base URL",
+            dlg_new.values()["base_url"] == "https://api.example.com/v1",
+            dlg_new.values()["base_url"])
+
+    seen: list[tuple[str, str]] = []
+    real_at = _P.list_models_at
+
+    def _fake_at(url: str, key: str, **_kw):
+        seen.append((url, key))
+        return True, "连接正常，可用模型 1 个", ["demo-model"]
+
+    _P.list_models_at = _fake_at
+    try:
+        dlg_new._url.setText("")
+        dlg_new._key.setText("")
+        dlg_new._on_test()
+        c.check("未填地址与密钥时给出指引而不是静默失败",
+                "接口地址" in dlg_new._test_msg.text(), dlg_new._test_msg.text())
+
+        dlg_new._url.setText("https://api.opencode.ai/v1")
+        dlg_new._key.setText("sk-demo")
+        dlg_new._on_test()
+        c.check("★ 测试用的是**正在填**的地址与密钥",
+                bool(seen) and seen[-1] == ("https://api.opencode.ai/v1", "sk-demo"),
+                str(seen[-1:]))
+        c.check("测试成功时把模型清单填进下拉",
+                dlg_new._model.count() >= 1, str(dlg_new._model.count()))
+    finally:
+        _P.list_models_at = real_at
+
+
+    # ------------------------------------------------------------------
     c.section("第 1 节：★ 密钥只写 —— 输入框不回显任何密钥")
     # ------------------------------------------------------------------
     spec = providers.all_specs()["deepseek"]
@@ -173,8 +221,11 @@ def main() -> int:
     c.section("第 6 节：测试连接（区分四类失败，不真调网络）")
     # ------------------------------------------------------------------
     c.check("编辑对话框里有「测试连接」按钮", hasattr(dlg, "_btn_test"))
-    c.check("新建时「测试连接」**禁用**（还没落库，测不了）",
-            d2._btn_test.isEnabled() is False)
+    # ★ 这条断言的方向在 2026-11-05 反转过：原先要求"新建时禁用"，
+    #   理由是想不出怎么测（还没落库、凭据层里没有它的键）。但新建恰恰是最想
+    #   先验证地址与密钥的时候，所以改成允许用**正在填的地址与密钥**直接测。
+    c.check("★ 新建时「测试连接」**可用**（用正在填的地址与密钥测）",
+            d2._btn_test.isEnabled() is True)
     c.check("已有提供商时「测试连接」**可用**", dlg._btn_test.isEnabled() is True)
     c.check("`providers.test_connection` 存在",
             callable(getattr(providers, "test_connection", None)))

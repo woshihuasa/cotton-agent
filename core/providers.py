@@ -654,6 +654,60 @@ def set_default(name: str) -> None:
     reload_config()
 
 
+#: 用户常把"完整请求地址"填进接口地址栏。这两段是 OpenAI 兼容端点里会被
+#: 程序自己追加的部分，填进来会导致路径重复（`/v1/chat/completions/chat/completions`）。
+_ENDPOINT_SUFFIXES: tuple[str, ...] = (
+    "/chat/completions", "/completions", "/models", "/embeddings",
+)
+
+
+def normalize_base_url(url: str) -> tuple[str, str]:
+    """纠正接口地址的常见写法，返回 `(规范化后的地址, 说明)`。
+
+    【为什么需要】这一栏的语义是 **base URL**，即"程序自己会在后面接
+    `/chat/completions` 的那一截"。但服务商文档里往往同时给出完整的请求地址，
+    用户照着抄就会多出一段，症状是 404 或路径重复，而错误信息看着像"地址不通"，
+    很难联想到是多填了一段。
+
+    三条纠正规则：
+      ① 没写协议头 → 补 `https://`（少有人用 http，且明文传输不该默认）；
+      ② 末尾多余斜杠 → 去掉（`/v1/` 与 `/v1` 等价，但拼接时会变成 `//`）；
+      ③ 末尾带了 `/chat/completions` 之类 → 去掉，并说明原因。
+
+    不做的事：**不自动补 `/v1`**。有些服务（例如 DeepSeek 官方）接受不带版本段
+    的地址，也有网关用 `/openai/v1` 这种自定义路径；替用户猜反而会猜错。
+    """
+    raw = str(url or "").strip()
+    if not raw:
+        return "", ""
+    notes: list[str] = []
+    fixed = raw
+    if "://" not in fixed:
+        fixed = "https://" + fixed
+        notes.append("已补上 https://")
+    while fixed.endswith("/"):
+        fixed = fixed[:-1]
+    for suffix in _ENDPOINT_SUFFIXES:
+        if fixed.lower().endswith(suffix):
+            fixed = fixed[: -len(suffix)].rstrip("/")
+            notes.append(f"已去掉末尾的 {suffix}（这里只填到 /v1 为止）")
+            break
+    return fixed, "；".join(notes)
+
+
+def endpoint_preview(base_url: str, path: str = "/chat/completions") -> str:
+    """给界面用的预览：把"实际会请求哪个地址"算出来。
+
+    ★ 存在的意义是把抽象概念变成具体字符串。用户不必理解"base URL"是什么，
+      只要看一眼这行就知道自己填的地址接上 `/chat/completions` 之后长什么样，
+      填错时当场能看出来。
+    """
+    fixed, _note = normalize_base_url(base_url)
+    if not fixed:
+        return ""
+    return fixed.rstrip("/") + path
+
+
 def list_models_at(base_url: str, api_key: str, *,
                    timeout_s: float = 20.0) -> tuple[bool, str, list[str]]:
     """按**端点 + 密钥**拉模型清单（不查登记表、不读凭据层）。

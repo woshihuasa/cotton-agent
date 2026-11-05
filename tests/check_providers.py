@@ -54,6 +54,37 @@ class _FakeErr(Exception):
             self.status_code = status
 
 
+def section_base_url(c: Checker) -> None:
+    c.section("第 N 节：★ 接口地址的常见写法都要能被纠正")
+
+    from core.providers import endpoint_preview, normalize_base_url
+
+    cases = [
+        ("https://api.deepseek.com", "https://api.deepseek.com", ""),
+        ("https://x.com/v1/", "https://x.com/v1", ""),
+        ("  https://a.cn/openai/v1  ", "https://a.cn/openai/v1", ""),
+    ]
+    for raw, want, _note in cases:
+        got, _n = normalize_base_url(raw)
+        c.check(f"规范化 {raw!r}", got == want, f"得到 {got!r}")
+
+    got, note = normalize_base_url("api.example.com/v1/chat/completions")
+    c.check("★ 没写协议头时补 https://", got.startswith("https://"), got)
+    c.check("★ 贴了完整请求地址时去掉 /chat/completions",
+            got == "https://api.example.com/v1", got)
+    c.check("纠正时给出说明（否则用户不知道被改了）", bool(note), note)
+
+    c.check("空地址不抛异常", normalize_base_url("") == ("", ""))
+    c.check("★ 不自动补 /v1（各家的路径段不一样，猜就会猜错）",
+            normalize_base_url("https://a.cn")[0] == "https://a.cn",
+            normalize_base_url("https://a.cn")[0])
+    c.check("预览把 /chat/completions 接在后面",
+            endpoint_preview("https://a.cn/v1/")
+            == "https://a.cn/v1/chat/completions",
+            endpoint_preview("https://a.cn/v1/"))
+    c.check("空地址的预览为空", endpoint_preview("") == "")
+
+
 def main() -> int:
     c = Checker()
     P = providers.PROVIDERS
